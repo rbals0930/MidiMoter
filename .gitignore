@@ -1,0 +1,16 @@
+# Python 가상환경 및 캐시
+backend/.venv/
+backend/__pycache__/
+*.pyc
+*.pyo
+
+# 로컬 변환 결과 MIDI 및 내부 작업 문서 제외
+midi/
+PLAN.md
+
+# 임시 오디오·로그 및 OS 파일
+*.wav
+*.mp3
+*.log
+.DS_Store
+Thumbs.db

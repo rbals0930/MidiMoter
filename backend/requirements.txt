@@ -1,0 +1,8 @@
+yt-dlp>=2024.10.0
+imageio-ffmpeg>=0.5.1
+basic-pitch[onnx]>=0.3.3
+fastapi>=0.115.0
+uvicorn>=0.30.0
+python-multipart>=0.0.9
+demucs>=4.0.1
+setuptools<81
