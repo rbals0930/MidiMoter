@@ -1,11 +1,12 @@
 """
-MidiMoter 3단계 로컬 변환 백엔드 서버 (v3.2)
-FastAPI + yt-dlp + librosa HPSS + Demucs AI 스템 분리 + basic-pitch ONNX + 4트랙 자동 분리
+MidiMoter 3단계 로컬 변환 백엔드 서버 (v3.3)
+FastAPI + yt-dlp + librosa HPSS + Demucs AI 스템 분리 + basic-pitch ONNX
++ Note Stitching(떨림 병합) + Smart Bass Handoff + 축별 맞춤 잔향 컷
 -----------------------------------------------------------------------------------------
 변환 모드:
-  - clean  (기본, 빠른 4트랙 · 큰 줄기): HPSS 드럼 제거 + basic-pitch + 4트랙 자동 분리 (20~40초)
-  - stems  (고품질 4트랙 · Demucs AI)  : Demucs(htdemucs)로 보컬/반주/베이스/드럼(폐기) 분리 후
-                                         각 스템별 채보 -> 4트랙 MIDI 생성 (기악곡 자동 폴백)
+  - clean  (기본, 빠른 4트랙 · 큰 줄기): HPSS 드럼 제거 + basic-pitch + 4트랙 자동 분리·정제 (20~40초)
+  - stems  (고품질 4트랙 · Demucs AI)  : Demucs(htdemucs)로 보컬/반주/베이스/드럼(폐기) 분리,
+                                         보컬곡·기악곡(Off Vocal) 자동 판별 + 조용한 구간 베이스 보완
   - detail (빠른 4트랙 · 디테일)       : 세밀한 감도 채보 + 4트랙 자동 분리
 
 CLI 단독 변환 지원:
@@ -25,6 +26,7 @@ from urllib.parse import quote
 
 import imageio_ffmpeg
 import librosa
+import numpy as np
 import pretty_midi
 import soundfile as sf
 import uvicorn
@@ -48,17 +50,22 @@ DEMUCS_AVAILABLE = importlib.util.find_spec("demucs") is not None
 MODE_PRESETS = {
     "clean": {
         "remove_drums": True,
-        "onset_threshold": 0.62,
-        "frame_threshold": 0.48,
-        "min_note_ms": 110.0,
-        "min_velocity": 48,
+        "onset_threshold": 0.60,
+        "frame_threshold": 0.46,
+        "min_note_ms": 95.0,
+        "min_velocity": 46,
+        # 축별 최소 지속시간(초): X(멜로디), Y(화음1), Z(코드 패드), A(베이스)
+        "axis_min_dur": (0.070, 0.085, 0.120, 0.100),
+        "stitch_gap": (0.045, 0.045, 0.055, 0.055),
     },
     "stems": {
         "remove_drums": False,  # Demucs가 드럼 스템을 직접 분리·폐기함
-        "onset_threshold": 0.56,
+        "onset_threshold": 0.55,
         "frame_threshold": 0.42,
-        "min_note_ms": 95.0,
+        "min_note_ms": 85.0,
         "min_velocity": 42,
+        "axis_min_dur": (0.070, 0.085, 0.120, 0.100),
+        "stitch_gap": (0.045, 0.045, 0.055, 0.055),
     },
     "detail": {
         "remove_drums": False,
@@ -66,10 +73,12 @@ MODE_PRESETS = {
         "frame_threshold": 0.35,
         "min_note_ms": 65.0,
         "min_velocity": 25,
+        "axis_min_dur": (0.050, 0.055, 0.070, 0.070),
+        "stitch_gap": (0.035, 0.035, 0.040, 0.040),
     },
 }
 
-app = FastAPI(title="MidiMoter AI Converter API", version="3.2")
+app = FastAPI(title="MidiMoter AI Converter API", version="3.3")
 
 # file:// 로 연 index.html 에서도 호출할 수 있도록 CORS 전체 허용
 app.add_middleware(
@@ -157,6 +166,46 @@ def predict_filtered_notes(
 
 
 # ---------------------------------------------------------------------------
+# 후처리 유틸: Note Stitching(떨림 병합) 및 Smart Bass Handoff
+# ---------------------------------------------------------------------------
+def stitch_track_notes(
+    notes: List[pretty_midi.Note],
+    max_gap_sec: float = 0.045,
+    min_dur_sec: float = 0.070,
+) -> List[pretty_midi.Note]:
+    """같은 음정이 미세한 간격(<= max_gap_sec)으로 끊기는 AI 채보 떨림을 병합하고 잔향 컷"""
+    if not notes:
+        return []
+    sorted_notes = sorted(notes, key=lambda n: (n.start, n.end))
+    stitched: List[pretty_midi.Note] = []
+
+    for n in sorted_notes:
+        if stitched and stitched[-1].pitch == n.pitch and (n.start - stitched[-1].end) <= max_gap_sec:
+            stitched[-1].end = max(stitched[-1].end, n.end)
+            stitched[-1].velocity = max(stitched[-1].velocity, n.velocity)
+        else:
+            stitched.append(pretty_midi.Note(
+                velocity=n.velocity,
+                pitch=n.pitch,
+                start=n.start,
+                end=n.end,
+            ))
+
+    return [n for n in stitched if (n.end - n.start) >= min_dur_sec]
+
+
+def is_covered_by(t_start: float, t_end: float, ref_notes: List[pretty_midi.Note], pad: float = 0.18) -> bool:
+    """특정 시간 구간이 기준 트랙(예: bass 스템)에 이미 덮여 있는지 확인"""
+    for r in ref_notes:
+        if r.end + pad < t_start:
+            continue
+        if r.start - pad > t_end:
+            break
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # 4트랙 자동 분리 엔진 (반음 충돌 제거 + 음량 기반 역할 선별 + Voice Locking)
 # ---------------------------------------------------------------------------
 def split_notes_into_k_voices(
@@ -174,7 +223,6 @@ def split_notes_into_k_voices(
     if not notes or num_voices <= 0:
         return [[] for _ in range(max(0, num_voices))]
 
-    # 모든 시작/종료 시각 수집 (1ms 반올림으로 미세 지터 병합)
     events: List[Tuple[float, int, pretty_midi.Note]] = []
     for n in notes:
         s = round(n.start, 3)
@@ -186,8 +234,8 @@ def split_notes_into_k_voices(
 
     events.sort(key=lambda x: (x[0], x[1]))
 
-    active: Dict[int, List[int]] = {}  # pitch -> [velocities]
-    prev_assigned: List[Optional[Tuple[int, int]]] = [None] * num_voices  # (pitch, vel)
+    active: Dict[int, List[int]] = {}
+    prev_assigned: List[Optional[Tuple[int, int]]] = [None] * num_voices
     open_notes: List[Optional[pretty_midi.Note]] = [None] * num_voices
     result_tracks: List[List[pretty_midi.Note]] = [[] for _ in range(num_voices)]
 
@@ -225,7 +273,6 @@ def split_notes_into_k_voices(
                     if not vels:
                         del active[note_obj.pitch]
 
-        # 후보 리스트: (pitch, max_vel)
         cands = [(p, max(vs)) for p, vs in active.items() if vs]
 
         # 1) 1반음 충돌 제거 (음량 강한 음 우선 생존)
@@ -249,20 +296,17 @@ def split_notes_into_k_voices(
                 pick = min(strong, key=lambda c: c[0]) if pick_mode == "low" else max(strong, key=lambda c: c[0])
                 selected_map[pick[0]] = pick[1]
             else:
-                # 최고음 멜로디 (강한 음 중 최고음)
                 mel_pool = [c for c in pool if c[1] >= max_vel * 0.65] or pool
                 mel = max(mel_pool, key=lambda c: c[0])
                 selected_map[mel[0]] = mel[1]
                 pool.remove(mel)
 
-                # 베이스 (마지막 트랙이 베이스 역할일 때, 강한 음 중 최저음)
                 if prefer_bass_on_last and len(selected_map) < num_voices and pool:
                     bass_pool = [c for c in pool if c[1] >= max_vel * 0.55] or pool
                     bass = min(bass_pool, key=lambda c: c[0])
                     selected_map[bass[0]] = bass[1]
                     pool.remove(bass)
 
-                # 나머지 화음: 음량이 강한 순
                 pool.sort(key=lambda c: (-c[1], -c[0]))
                 while len(selected_map) < num_voices and pool:
                     p, v = pool.pop(0)
@@ -281,8 +325,7 @@ def split_notes_into_k_voices(
             else:
                 empty_chs.append(ch)
 
-        # 남은 새 음표들을 남은 트랙에 배치
-        rest_sorted = sorted(unassigned.items(), key=lambda x: x[0])  # 저음 -> 고음
+        rest_sorted = sorted(unassigned.items(), key=lambda x: x[0])
         if prefer_bass_on_last and (num_voices - 1) in empty_chs and rest_sorted:
             p, v = rest_sorted.pop(0)
             assigned[num_voices - 1] = (p, v)
@@ -290,7 +333,7 @@ def split_notes_into_k_voices(
 
         for ch in empty_chs:
             if rest_sorted:
-                p, v = rest_sorted.pop()  # 고음부터 상위 트랙 배치
+                p, v = rest_sorted.pop()
                 assigned[ch] = (p, v)
 
         for ch in range(num_voices):
@@ -301,7 +344,6 @@ def split_notes_into_k_voices(
 
         prev_assigned = assigned
 
-    # 마지막 열려 있는 노트 마감
     last_t = events[-1][0] if events else 0.0
     for ch in range(num_voices):
         flush_channel(ch, last_t, 0, 0)
@@ -329,9 +371,7 @@ def build_4track_midi(
 
 
 def separate_stems_with_demucs(src_audio: Path, work_dir: Path) -> Dict[str, Path]:
-    """
-    Meta Demucs(htdemucs)로 오디오를 vocals / bass / other / drums 4개 WAV 스템으로 분리.
-    """
+    """Meta Demucs(htdemucs)로 오디오를 vocals / bass / other / drums 4개 WAV 스템으로 분리"""
     if not DEMUCS_AVAILABLE:
         raise RuntimeError(
             "Demucs가 설치되어 있지 않습니다. 가상환경에 `pip install demucs`를 설치해 주세요."
@@ -377,34 +417,69 @@ def transcribe_audio_to_4track_midi(
 ) -> Path:
     """
     선택된 모드(clean / stems / detail)로 오디오를 4트랙 MIDI로 변환
+    모든 모드에 Note Stitching(떨림 병합)과 축별 맞춤 잔향 컷 적용
     """
     cfg = MODE_PRESETS.get(mode, MODE_PRESETS["clean"])
+    min_durs = cfg["axis_min_dur"]
+    gaps = cfg["stitch_gap"]
 
     if mode == "stems":
-        # 고품질 모드: Demucs로 보컬/반주/베이스 분리 (드럼 스템은 자동 폐기)
+        # 1) Demucs로 보컬/반주/베이스 분리 (drums 스템 완전 폐기)
         stems = separate_stems_with_demucs(src_audio, work_dir)
 
-        # 각 스템을 22050Hz 모노로 맞춰 basic-pitch 채보
-        vocals_notes: List[pretty_midi.Note] = []
-        other_notes: List[pretty_midi.Note] = []
-        bass_notes: List[pretty_midi.Note] = []
+        o_wav = work_dir / "stem_other_22k.wav"
+        convert_audio_ffmpeg(stems["other"], o_wav, sample_rate=22050, channels=1)
+        y_other, sr = sf.read(str(o_wav), dtype="float32")
+        rms_other = float(np.sqrt(np.mean(y_other ** 2))) + 1e-8
 
+        # 보컬 스템 존재 및 에너지 비율 측정 (보컬곡 vs 기악/Off Vocal 자동 판별)
+        y_voc = None
+        rms_voc = 0.0
+        v_wav = work_dir / "stem_vocals_22k.wav"
         if "vocals" in stems:
-            v_wav = work_dir / "stem_vocals_22k.wav"
             convert_audio_ffmpeg(stems["vocals"], v_wav, sample_rate=22050, channels=1)
+            y_voc, _ = sf.read(str(v_wav), dtype="float32")
+            rms_voc = float(np.sqrt(np.mean(y_voc ** 2)))
+
+        # 베이스 스템 전용 채보 (E1 ~ E4)
+        bass_notes: List[pretty_midi.Note] = []
+        if "bass" in stems:
+            b_wav = work_dir / "stem_bass_22k.wav"
+            convert_audio_ffmpeg(stems["bass"], b_wav, sample_rate=22050, channels=1)
+            bass_notes = predict_filtered_notes(
+                b_wav,
+                onset_threshold=0.52,
+                frame_threshold=0.40,
+                min_note_ms=110.0,
+                min_velocity=44,
+                min_freq=41.2,
+                max_freq=330.0,
+            )
+
+        track_a_bass = stitch_track_notes(
+            split_notes_into_k_voices(bass_notes, 1, prefer_bass_on_last=False, pick_mode="low")[0],
+            max_gap_sec=gaps[3],
+            min_dur_sec=min_durs[3],
+        )
+
+        # 보컬 에너지가 반주의 18% 이상이면 보컬곡으로 판단해 vocals를 독립 채보
+        is_vocal_song = (y_voc is not None) and (rms_voc >= rms_other * 0.18)
+        vocals_notes: List[pretty_midi.Note] = []
+        if is_vocal_song:
             vocals_notes = predict_filtered_notes(
                 v_wav,
                 onset_threshold=cfg["onset_threshold"],
                 frame_threshold=cfg["frame_threshold"],
                 min_note_ms=cfg["min_note_ms"],
                 min_velocity=cfg["min_velocity"],
-                min_freq=130.8,   # C3 이상 (보컬/리드 대역)
+                min_freq=130.8,
                 max_freq=1568.0,
             )
+            if len(vocals_notes) < 20:
+                is_vocal_song = False
 
-        if "other" in stems:
-            o_wav = work_dir / "stem_other_22k.wav"
-            convert_audio_ffmpeg(stems["other"], o_wav, sample_rate=22050, channels=1)
+        if is_vocal_song:
+            # 보컬곡: X=Vocals, Y·Z=Other(2성부), A=Bass(+조용한 구간 왼손 보완)
             other_notes = predict_filtered_notes(
                 o_wav,
                 onset_threshold=cfg["onset_threshold"],
@@ -415,49 +490,76 @@ def transcribe_audio_to_4track_midi(
                 max_freq=1568.0,
             )
 
-        if "bass" in stems:
-            b_wav = work_dir / "stem_bass_22k.wav"
-            convert_audio_ffmpeg(stems["bass"], b_wav, sample_rate=22050, channels=1)
-            bass_notes = predict_filtered_notes(
-                b_wav,
-                onset_threshold=cfg["onset_threshold"],
-                frame_threshold=cfg["frame_threshold"],
-                min_note_ms=cfg["min_note_ms"],
-                min_velocity=cfg["min_velocity"],
-                min_freq=41.2,    # E1 ~ C4 (베이스 전용 대역)
-                max_freq=330.0,
+            lh_cands = [
+                n for n in other_notes
+                if n.pitch <= 55 and not is_covered_by(n.start, n.end, track_a_bass, pad=0.18)
+            ]
+            lh_mono = stitch_track_notes(
+                split_notes_into_k_voices(lh_cands, 1, prefer_bass_on_last=False, pick_mode="low")[0],
+                max_gap_sec=gaps[3],
+                min_dur_sec=min_durs[3],
             )
+            track_a = sorted(track_a_bass + lh_mono, key=lambda n: n.start)
 
-        has_vocals = len(vocals_notes) >= 8
-        has_bass = len(bass_notes) >= 5
+            used_lh = {(round(n.start, 2), n.pitch) for n in lh_cands}
+            upper_other = [n for n in other_notes if (round(n.start, 2), n.pitch) not in used_lh and n.pitch >= 48]
 
-        if has_vocals and has_bass:
-            # 보컬 + 반주(2성부) + 베이스 정석 4트랙 구성
-            t_x = split_notes_into_k_voices(vocals_notes, 1, prefer_bass_on_last=False, pick_mode="high")[0]
-            t_yz = split_notes_into_k_voices(other_notes, 2, prefer_bass_on_last=False)
-            t_a = split_notes_into_k_voices(bass_notes, 1, prefer_bass_on_last=False, pick_mode="low")[0]
-            tracks = [t_x, t_yz[0], t_yz[1], t_a]
+            track_x = stitch_track_notes(
+                split_notes_into_k_voices(vocals_notes, 1, prefer_bass_on_last=False, pick_mode="high")[0],
+                max_gap_sec=gaps[0],
+                min_dur_sec=min_durs[0],
+            )
+            yz = split_notes_into_k_voices(upper_other, 2, prefer_bass_on_last=False)
+            track_y = stitch_track_notes(yz[0], max_gap_sec=gaps[1], min_dur_sec=min_durs[1])
+            track_z = stitch_track_notes(yz[1], max_gap_sec=gaps[2], min_dur_sec=min_durs[2])
             names = ["X-Axis Vocals", "Y-Axis Harmony 1", "Z-Axis Harmony 2", "A-Axis Bass"]
-        elif (not has_vocals) and has_bass:
-            # 기악곡(보컬 없음): 반주(other)에서 X·Y·Z 3성부 + 베이스 스템 A축
-            t_xyz = split_notes_into_k_voices(other_notes, 3, prefer_bass_on_last=False)
-            t_a = split_notes_into_k_voices(bass_notes, 1, prefer_bass_on_last=False, pick_mode="low")[0]
-            tracks = [t_xyz[0], t_xyz[1], t_xyz[2], t_a]
-            names = ["X-Axis Lead", "Y-Axis Harmony 1", "Z-Axis Harmony 2", "A-Axis Bass"]
-        elif has_vocals and (not has_bass):
-            # 베이스 없는 어쿠스틱/피아노 보컬곡: 보컬 X축 + 반주에서 Y·Z·A 3성부
-            t_x = split_notes_into_k_voices(vocals_notes, 1, prefer_bass_on_last=False, pick_mode="high")[0]
-            t_yza = split_notes_into_k_voices(other_notes, 3, prefer_bass_on_last=True)
-            tracks = [t_x, t_yza[0], t_yza[1], t_yza[2]]
-            names = ["X-Axis Vocals", "Y-Axis Harmony 1", "Z-Axis Harmony 2", "A-Axis Bass"]
+            return build_4track_midi([track_x, track_y, track_z, track_a], names, out_mid_path)
+
+        # 기악곡 / Off Vocal: other + vocals를 합산해 피아노 고음 잔여분까지 손실 없이 보존 (drums 완전 제외)
+        if y_voc is not None:
+            min_len = min(len(y_other), len(y_voc))
+            y_harm = y_other[:min_len] + y_voc[:min_len]
+            peak = float(np.max(np.abs(y_harm))) or 1.0
+            if peak > 0.98:
+                y_harm = y_harm * (0.95 / peak)
         else:
-            # 솔로 피아노 등: other 스템을 4트랙 자동 분리
-            tracks = split_notes_into_k_voices(other_notes, 4, prefer_bass_on_last=True)
-            names = ["X-Axis Melody", "Y-Axis Harmony 1", "Z-Axis Harmony 2", "A-Axis Bass"]
+            y_harm = y_other
 
-        return build_4track_midi(tracks, names, out_mid_path)
+        harm_wav = work_dir / "harmonic_no_drums_22k.wav"
+        sf.write(str(harm_wav), y_harm, sr)
+        harm_notes = predict_filtered_notes(
+            harm_wav,
+            onset_threshold=cfg["onset_threshold"],
+            frame_threshold=cfg["frame_threshold"],
+            min_note_ms=cfg["min_note_ms"],
+            min_velocity=cfg["min_velocity"],
+            min_freq=65.4,
+            max_freq=1568.0,
+        )
 
-    # 빠른 4트랙 모드 (clean / detail)
+        # Smart Bass Handoff: 베이스 스템이 쉬는 조용한 구간은 피아노 왼손 저음(<= G3)으로 A축 보완
+        lh_cands = [
+            n for n in harm_notes
+            if n.pitch <= 55 and not is_covered_by(n.start, n.end, track_a_bass, pad=0.18)
+        ]
+        lh_mono = stitch_track_notes(
+            split_notes_into_k_voices(lh_cands, 1, prefer_bass_on_last=False, pick_mode="low")[0],
+            max_gap_sec=gaps[3],
+            min_dur_sec=min_durs[3],
+        )
+        track_a = sorted(track_a_bass + lh_mono, key=lambda n: n.start)
+
+        used_lh = {(round(n.start, 2), n.pitch) for n in lh_cands}
+        upper_harm = [n for n in harm_notes if (round(n.start, 2), n.pitch) not in used_lh and n.pitch >= 48]
+
+        xyz = split_notes_into_k_voices(upper_harm, 3, prefer_bass_on_last=False)
+        track_x = stitch_track_notes(xyz[0], max_gap_sec=gaps[0], min_dur_sec=min_durs[0])
+        track_y = stitch_track_notes(xyz[1], max_gap_sec=gaps[1], min_dur_sec=min_durs[1])
+        track_z = stitch_track_notes(xyz[2], max_gap_sec=gaps[2], min_dur_sec=min_durs[2])
+        names = ["X-Axis Lead", "Y-Axis Harmony 1", "Z-Axis Chord Pad", "A-Axis Bass"]
+        return build_4track_midi([track_x, track_y, track_z, track_a], names, out_mid_path)
+
+    # 빠른 4트랙 모드 (clean / detail) + Note Stitching 및 축별 맞춤 잔향 컷 적용
     wav_path = work_dir / "input_22k.wav"
     prepare_wav_for_basic_pitch(src_audio, wav_path, remove_drums=cfg["remove_drums"])
     all_notes = predict_filtered_notes(
@@ -467,8 +569,12 @@ def transcribe_audio_to_4track_midi(
         min_note_ms=cfg["min_note_ms"],
         min_velocity=cfg["min_velocity"],
     )
-    tracks = split_notes_into_k_voices(all_notes, 4, prefer_bass_on_last=True)
-    names = ["X-Axis Melody", "Y-Axis Harmony 1", "Z-Axis Harmony 2", "A-Axis Bass"]
+    raw_tracks = split_notes_into_k_voices(all_notes, 4, prefer_bass_on_last=True)
+    tracks = [
+        stitch_track_notes(raw_tracks[i], max_gap_sec=gaps[i], min_dur_sec=min_durs[i])
+        for i in range(4)
+    ]
+    names = ["X-Axis Melody", "Y-Axis Harmony 1", "Z-Axis Chord Pad", "A-Axis Bass"]
     return build_4track_midi(tracks, names, out_mid_path)
 
 
@@ -511,7 +617,7 @@ def download_and_convert_youtube(
 def health_check():
     return {
         "status": "ok",
-        "version": "3.2",
+        "version": "3.3",
         "ffmpeg": os.path.basename(FFMPEG_EXE),
         "demucs_available": DEMUCS_AVAILABLE,
         "midi_dir": str(MIDI_OUT_DIR),
@@ -588,5 +694,5 @@ if __name__ == "__main__":
         print(f"[변환 완료] 제목: {title} (mode={args.mode})")
         print(f"[저장 경로] {saved} ({saved.stat().st_size:,} bytes)")
     else:
-        print(f"MidiMoter AI 4트랙 변환 서버 시작: http://{args.host}:{args.port} (Demucs={DEMUCS_AVAILABLE})")
+        print(f"MidiMoter AI 4트랙 변환 서버 시작: http://{args.host}:{args.port} (v3.3, Demucs={DEMUCS_AVAILABLE})")
         uvicorn.run(app, host=args.host, port=args.port)
