@@ -170,31 +170,45 @@ class PianoRollRenderer {
       }
     }
 
-    // 3) 4채널 음표 세그먼트 블록 그리기
+    // 3) 4채널 음표 세그먼트 블록 그리기 (오른쪽 음표 영역만 클리핑)
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(this.leftMargin, 0, drawW, h);
+    ctx.clip();
+
     for (let i = 0; i < this.segments.length; i++) {
       const seg = this.segments[i];
-      if (seg.endMs < viewStartMs || seg.startMs > viewEndMs) continue;
+      if (seg.endMs <= viewStartMs || seg.startMs >= viewEndMs) continue;
 
       const x1 = this.leftMargin + ((seg.startMs - viewStartMs) / 1000) * this.pxPerSec;
       const x2 = this.leftMargin + ((seg.endMs - viewStartMs) / 1000) * this.pxPerSec;
-      const bw = Math.max(2, x2 - x1);
+
+      // 화면 좌우 경계에 맞춰 실제 그리기 폭을 정확히 잘라 지나간 음표가 겹치지 않도록 처리
+      const drawX1 = Math.max(this.leftMargin, x1);
+      const drawX2 = Math.min(w, x2);
+      const bw = drawX2 - drawX1;
+      if (bw <= 0) continue;
+
+      const drawWBar = Math.max(1.5, bw);
       const y = h - (seg.note - this.minNote + 1) * rowH;
       const bh = Math.max(3, rowH - 1);
 
       const isActive = this.playheadMs >= seg.startMs && this.playheadMs <= seg.endMs;
+      const isPassed = seg.endMs < this.playheadMs;
       const isMuted = this.channelMuted[seg.ch];
 
-      ctx.globalAlpha = isMuted ? 0.2 : isActive ? 1.0 : 0.78;
+      ctx.globalAlpha = isMuted ? 0.18 : isActive ? 1.0 : isPassed ? 0.38 : 0.82;
       ctx.fillStyle = this.channelColors[seg.ch];
-      ctx.fillRect(Math.max(this.leftMargin, x1), y, bw, bh);
+      ctx.fillRect(drawX1, y, drawWBar, bh);
 
       if (isActive && !isMuted) {
         ctx.strokeStyle = '#ffffff';
         ctx.lineWidth = 1.2;
-        ctx.strokeRect(Math.max(this.leftMargin, x1), y, bw, bh);
+        ctx.strokeRect(drawX1, y, drawWBar, bh);
         ctx.lineWidth = 1;
       }
     }
+    ctx.restore();
     ctx.globalAlpha = 1.0;
 
     // 왼쪽 여백 구분선
