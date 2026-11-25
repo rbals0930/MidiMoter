@@ -7,6 +7,8 @@ class AudioPreviewSynth {
     this.ctx = null;
     this.masterGain = null;
     this.channels = [null, null, null, null];
+    // X(하이)·Y(멜로디) 전면 배치 + Z(미들)·A(베이스) 균형 잡힌 4단 계층 밸런스
+    this.channelGains = [0.78, 0.78, 0.58, 0.70];
     this.enabled = true;
     this.volume = 0.3;
   }
@@ -41,7 +43,7 @@ class AudioPreviewSynth {
         gain.connect(this.filter);
         osc.start();
 
-        this.channels[i] = { osc, gain };
+        this.channels[i] = { osc, gain, lastFreq: 0 };
       }
     }
 
@@ -67,8 +69,8 @@ class AudioPreviewSynth {
     }
   }
 
-  /** 특정 채널의 주파수(Hz) 설정 (0이면 무음) */
-  setChannelFreq(ch, freqHz) {
+  /** 특정 채널의 주파수(Hz) 설정 (0이면 무음, forceRetrigger=true면 짧은 쉼 후 재타건) */
+  setChannelFreq(ch, freqHz, forceRetrigger = false) {
     if (ch < 0 || ch >= 4) return;
     if (!this.enabled && freqHz > 0) return;
 
@@ -79,18 +81,48 @@ class AudioPreviewSynth {
 
     const now = this.ctx.currentTime;
     const node = this.channels[ch];
+    const gainParam = node.gain.gain;
+
     if (freqHz > 0) {
-      node.osc.frequency.setTargetAtTime(freqHz, now, 0.004);
-      node.gain.gain.setTargetAtTime(0.6, now, 0.008);
+      const baseGain = this.channelGains[ch] ?? 0.5;
+      const isNewAttack =
+        node.lastFreq === 0 || Math.abs(node.lastFreq - freqHz) > 0.5 || forceRetrigger;
+
+      if (!isNewAttack) {
+        return;
+      }
+
+      gainParam.cancelScheduledValues(now);
+      gainParam.setValueAtTime(gainParam.value, now);
+
+      const peak = Math.min(1.0, baseGain * 1.28);
+      const sustain = baseGain * 0.78;
+
+      if (forceRetrigger && node.lastFreq > 0) {
+        // 60Hz 프레임 경계 안에 짧은 무음이 겹친 경우 14ms 무음 딥 후 재타건
+        gainParam.setTargetAtTime(0.015, now, 0.002);
+        gainParam.setValueAtTime(0.015, now + 0.014);
+        node.osc.frequency.setValueAtTime(freqHz, now + 0.014);
+        gainParam.linearRampToValueAtTime(peak, now + 0.020);
+        gainParam.setTargetAtTime(sustain, now + 0.022, 0.045);
+      } else {
+        node.osc.frequency.setTargetAtTime(freqHz, now, 0.002);
+        gainParam.linearRampToValueAtTime(peak, now + 0.006);
+        gainParam.setTargetAtTime(sustain, now + 0.008, 0.045);
+      }
+      node.lastFreq = freqHz;
     } else {
-      node.gain.gain.setTargetAtTime(0, now, 0.01);
+      gainParam.cancelScheduledValues(now);
+      gainParam.setValueAtTime(gainParam.value, now);
+      gainParam.setTargetAtTime(0, now, 0.003);
+      node.lastFreq = 0;
     }
   }
 
   /** 4채널 일괄 주파수 설정 */
-  setAllFreqs(freqsHz) {
+  setAllFreqs(freqsHz, retriggerMask = null) {
     for (let i = 0; i < 4; i++) {
-      this.setChannelFreq(i, freqsHz[i] || 0);
+      this.setChannelFreq(i, freqsHz[i] || 0, !!(retriggerMask && retriggerMask[i]));
     }
   }
 

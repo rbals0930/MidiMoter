@@ -1,7 +1,7 @@
 /**
- * MidiMoter 웹 컨트롤러 메인 애플리케이션 (v2.0)
- * - 시리얼 연결, 4축 상태 표시, MIDI 트랙 매핑·재편곡, 4채널 피아노 롤,
- *   단독 .ino 내보내기, 내장 데모 곡, 가상 건반 통합 관리
+ * MidiMoter 웹 컨트롤러 메인 애플리케이션 (v6.0)
+ * - 시리얼 연결, 4축 상태 표시, MIDI 트랙 매핑·재편곡, 4채널 피아노 롤 직접 편집,
+ *   4트랙 .mid 저장, 단독 .ino 내보내기, 내장 데모 곡, 가상 건반, 기능 안내 통합 관리
  */
 (function () {
   const {
@@ -9,12 +9,17 @@
     midiToNoteName,
     allocateFourVoices,
     framesToSegments,
+    normalizeEditedSegments,
+    segmentsToFrames,
     parseMidiRaw,
     buildFourAxisTimeline,
   } = window.MidiParser;
 
   // UI 요소 참조
   const el = {
+    btnOpenHelp: document.getElementById('btnOpenHelp'),
+    helpModal: document.getElementById('helpModal'),
+    btnCloseHelp: document.getElementById('btnCloseHelp'),
     serialStatus: document.getElementById('serialStatus'),
     btnConnect: document.getElementById('btnConnect'),
     btnDisconnect: document.getElementById('btnDisconnect'),
@@ -23,6 +28,7 @@
     microstepSelect: document.getElementById('microstepSelect'),
     chkAudioPreview: document.getElementById('chkAudioPreview'),
     volumeSlider: document.getElementById('volumeSlider'),
+    volumeLabel: document.getElementById('volumeLabel'),
     dropZone: document.getElementById('dropZone'),
     midiFileInput: document.getElementById('midiFileInput'),
     btnBrowseMidi: document.getElementById('btnBrowseMidi'),
@@ -40,6 +46,7 @@
     transposeLabel: document.getElementById('transposeLabel'),
     octaveSelect: document.getElementById('octaveSelect'),
     allocModeSelect: document.getElementById('allocModeSelect'),
+    voiceFillSelect: document.getElementById('voiceFillSelect'),
     maxNoteSelect: document.getElementById('maxNoteSelect'),
     staccatoSlider: document.getElementById('staccatoSlider'),
     staccatoLabel: document.getElementById('staccatoLabel'),
@@ -47,13 +54,35 @@
     minDurLabel: document.getElementById('minDurLabel'),
     minVelSlider: document.getElementById('minVelSlider'),
     minVelLabel: document.getElementById('minVelLabel'),
+    btnResetSettings: document.getElementById('btnResetSettings'),
     btnExportIno: document.getElementById('btnExportIno'),
     trackListPanel: document.getElementById('trackListPanel'),
     trackTableBody: document.getElementById('trackTableBody'),
+    pianoRollCard: document.getElementById('pianoRollCard'),
+    pianoRollWrap: document.getElementById('pianoRollWrap'),
     pianoRollCanvas: document.getElementById('pianoRollCanvas'),
+    pianoRollHScroll: document.getElementById('pianoRollHScroll'),
+    pianoRollHSpacer: document.getElementById('pianoRollHSpacer'),
+    btnFullscreenRoll: document.getElementById('btnFullscreenRoll'),
+    fsBtnPlay: document.getElementById('fsBtnPlay'),
+    fsBtnPause: document.getElementById('fsBtnPause'),
+    fsBtnStop: document.getElementById('fsBtnStop'),
+    fsTimeLabel: document.getElementById('fsTimeLabel'),
     zoomSlider: document.getElementById('zoomSlider'),
+    btnModeSeek: document.getElementById('btnModeSeek'),
+    btnModeEdit: document.getElementById('btnModeEdit'),
+    editorBpmInput: document.getElementById('editorBpmInput'),
+    snapSelect: document.getElementById('snapSelect'),
+    btnPitchUp: document.getElementById('btnPitchUp'),
+    btnPitchDown: document.getElementById('btnPitchDown'),
+    btnUndo: document.getElementById('btnUndo'),
+    btnRedo: document.getElementById('btnRedo'),
+    btnNewBlank: document.getElementById('btnNewBlank'),
+    btnExportMidi: document.getElementById('btnExportMidi'),
+    editorHint: document.getElementById('editorHint'),
     pianoKeyboard: document.getElementById('pianoKeyboard'),
     serialLog: document.getElementById('serialLog'),
+    btnToggleLog: document.getElementById('btnToggleLog'),
     btnClearLog: document.getElementById('btnClearLog'),
     backendStatus: document.getElementById('backendStatus'),
     btnCheckBackend: document.getElementById('btnCheckBackend'),
@@ -75,8 +104,9 @@
     transpose: 0,
     octaveShift: 0,
     allocMode: 'smart',     // 'smart' (음량+연속성+반음제거) | 'pitch' (단순 높이순)
+    voiceFillMode: 'original', // 'original' | 'harmonize' (빈 축 화음·옥타브 보강)
     maxNote: 91,            // 기본 고음 상한 G6(91)
-    staccatoMs: 0,
+    staccatoMs: 25,
     minDurationMs: 0,       // 실시간 잡음 컷: 최소 음표 길이(ms)
     minVelocity: 0,         // 실시간 잡음 컷: 최소 강도(0~127)
     speed: 1.0,
@@ -89,6 +119,17 @@
     lastTickPerfMs: 0,
     rafId: null,
     pressedKeys: new Set(),
+    // 4-1단계: 피아노 롤 직접 편집 상태
+    editorMode: 'seek',     // 'seek' | 'edit'
+    editChannel: 0,         // 0(X), 1(Y), 2(Z), 3(A)
+    editorBpm: 120,
+    snapDiv: 4,             // 0=자유, 1=1/4, 2=1/8, 4=1/16
+    isManuallyEdited: false,
+    minSongDurationMs: 0,
+    isFullscreenRoll: false,
+    undoStack: [],
+    redoStack: [],
+    previewTimer: null,
   };
 
   function appendLog(msg) {
@@ -108,21 +149,47 @@
 
   const audio = new window.AudioPreviewSynth();
 
-  const pianoRoll = new window.PianoRollRenderer(el.pianoRollCanvas, (targetMs) => {
-    seekToMs(targetMs);
-  });
+  let lastSyncedScrollPx = -1;
+
+  function syncHScrollFromCanvas(metrics) {
+    if (!el.pianoRollHScroll || !el.pianoRollHSpacer || !metrics) return;
+    el.pianoRollHSpacer.style.width = `${metrics.totalPx + metrics.leftMargin}px`;
+    if (Math.abs(el.pianoRollHScroll.scrollLeft - metrics.scrollLeftPx) >= 2) {
+      lastSyncedScrollPx = metrics.scrollLeftPx;
+      el.pianoRollHScroll.scrollLeft = metrics.scrollLeftPx;
+    }
+  }
+
+  const pianoRoll = new window.PianoRollRenderer(
+    el.pianoRollCanvas,
+    (targetMs) => {
+      seekToMs(targetMs);
+    },
+    {
+      onChange: (nextSegments, prioritySeg, actionLabel) => {
+        commitManualEdit(nextSegments, prioritySeg, actionLabel);
+      },
+      onPreviewNote: (ch, note) => {
+        previewEditNote(ch, note);
+      },
+      onScrollSync: (metrics) => {
+        syncHScrollFromCanvas(metrics);
+      },
+    }
+  );
 
   // ---------------------------------------------------------
   // 4채널 출력 반영 (UI + 브라우저 오디오 + 아두이노 시리얼)
   // ---------------------------------------------------------
-  function applyChannelNotes(notes, forceSend = false) {
+  function applyChannelNotes(notes, forceSend = false, retriggerMask = null) {
     const shiftedNotes = notes.map((n, ch) => {
       if (!n || state.channelMuted[ch]) return 0;
       return Math.max(24, Math.min(108, n + state.transpose));
     });
 
+    const hasRetrigger = Array.isArray(retriggerMask) && retriggerMask.some(Boolean);
     const changed =
-      forceSend || shiftedNotes.some((n, i) => n !== state.channelNotes[i]);
+      forceSend || hasRetrigger || shiftedNotes.some((n, i) => n !== state.channelNotes[i]);
 
     if (!changed) return;
     state.channelNotes = shiftedNotes;
@@ -154,7 +221,7 @@
       }
     }
 
-    audio.setAllFreqs(audioFreqs);
+    audio.setAllFreqs(audioFreqs, retriggerMask);
     if (serial.isConnected) {
       serial.sendAllChannels(motorFreqsX10);
     }
@@ -197,9 +264,9 @@
         <td>
           <select>
             <option value="auto" ${tr.targetAxis === 'auto' ? 'selected' : ''}>자동 4성부 분배</option>
-            <option value="0" ${tr.targetAxis === '0' ? 'selected' : ''}>X축 고정 (멜로디)</option>
-            <option value="1" ${tr.targetAxis === '1' ? 'selected' : ''}>Y축 고정 (화음 1)</option>
-            <option value="2" ${tr.targetAxis === '2' ? 'selected' : ''}>Z축 고정 (화음 2)</option>
+            <option value="0" ${tr.targetAxis === '0' ? 'selected' : ''}>X축 고정 (하이)</option>
+            <option value="1" ${tr.targetAxis === '1' ? 'selected' : ''}>Y축 고정 (멜로디)</option>
+            <option value="2" ${tr.targetAxis === '2' ? 'selected' : ''}>Z축 고정 (미들)</option>
             <option value="3" ${tr.targetAxis === '3' ? 'selected' : ''}>A축 고정 (베이스)</option>
           </select>
         </td>
@@ -222,9 +289,170 @@
   }
 
   // ---------------------------------------------------------
+  // 4-1단계: 피아노 롤 직접 편집, Undo/Redo, 미리듣기 동기화
+  // ---------------------------------------------------------
+  function cloneSegments(segs) {
+    return (segs || []).map((s) => ({
+      ch: s.ch,
+      note: s.note,
+      startMs: s.startMs,
+      endMs: s.endMs,
+    }));
+  }
+
+  function updateUndoButtons() {
+    if (el.btnUndo) el.btnUndo.disabled = state.undoStack.length === 0;
+    if (el.btnRedo) el.btnRedo.disabled = state.redoStack.length === 0;
+  }
+
+  function updateSongDisplay() {
+    if (!state.song) return;
+    el.songTitle.textContent = state.song.title;
+    if (state.isManuallyEdited) {
+      const badge = document.createElement('span');
+      badge.className = 'edited-badge';
+      badge.textContent = '편집됨';
+      el.songTitle.appendChild(badge);
+    }
+
+    const segCount = (state.song.segments || []).length;
+    el.songMeta.textContent = `4채널 프레임 ${state.song.frames.length.toLocaleString()}개 · 음표 ${segCount.toLocaleString()}개 · 길이 ${formatTime(state.song.durationMs)}`;
+    el.timeTotal.textContent = formatTime(state.song.durationMs);
+
+    const hasNotes = state.song.frames.length > 0;
+    el.seekBar.disabled = state.song.durationMs <= 0;
+    el.btnPlay.disabled = !hasNotes || state.isPlaying;
+    el.btnStop.disabled = !hasNotes;
+    el.btnExportIno.disabled = !hasNotes;
+    if (el.btnExportMidi) el.btnExportMidi.disabled = segCount === 0;
+    syncFsControls();
+  }
+
+  function syncFsControls() {
+    if (el.fsBtnPlay) el.fsBtnPlay.disabled = el.btnPlay.disabled;
+    if (el.fsBtnPause) el.fsBtnPause.disabled = el.btnPause.disabled;
+    if (el.fsBtnStop) el.fsBtnStop.disabled = el.btnStop.disabled;
+    if (el.fsTimeLabel) {
+      const totalMs = state.song ? state.song.durationMs : 0;
+      el.fsTimeLabel.textContent = `${formatTime(state.playheadMs)} / ${formatTime(totalMs)}`;
+    }
+  }
+
+  function setFullscreenRoll(enabled) {
+    state.isFullscreenRoll = !!enabled;
+    if (el.pianoRollCard) {
+      el.pianoRollCard.classList.toggle('fullscreen', state.isFullscreenRoll);
+    }
+    document.body.classList.toggle('no-scroll', state.isFullscreenRoll);
+    if (el.btnFullscreenRoll) {
+      el.btnFullscreenRoll.textContent = state.isFullscreenRoll ? '전체화면 닫기 (ESC)' : '전체화면';
+    }
+    requestAnimationFrame(() => {
+      pianoRoll.resize();
+      pianoRoll.render();
+    });
+  }
+
+  function previewEditNote(ch, note) {
+    if (state.isPlaying || state.pressedKeys.size > 0 || !note) return;
+    if (state.previewTimer) {
+      clearTimeout(state.previewTimer);
+      state.previewTimer = null;
+    }
+    const shifted = Math.max(24, Math.min(108, note + state.transpose));
+    audio.setChannelFreq(ch, midiToFreq(shifted));
+    state.previewTimer = setTimeout(() => {
+      if (!state.isPlaying && state.pressedKeys.size === 0) {
+        audio.setChannelFreq(ch, 0);
+      }
+      state.previewTimer = null;
+    }, 170);
+  }
+
+  function applyEditedSegments(nextSegments, prioritySeg, actionLabel) {
+    if (!state.song) return;
+    const normalized = normalizeEditedSegments(nextSegments, prioritySeg);
+
+    let maxEnd = 0;
+    for (const s of normalized) {
+      if (s.endMs > maxEnd) maxEnd = s.endMs;
+    }
+    if (maxEnd > Math.max(0, state.minSongDurationMs - 2000)) {
+      state.minSongDurationMs = Math.max(state.minSongDurationMs, maxEnd + 4000);
+    }
+
+    const rebuilt = segmentsToFrames(normalized, state.minSongDurationMs);
+    state.song.frames = rebuilt.frames;
+    state.song.segments = rebuilt.segments;
+    state.song.durationMs = rebuilt.durationMs;
+    state.isManuallyEdited = true;
+
+    // 현재 플레이헤드 기준 프레임 인덱스 재계산
+    let fIdx = 0;
+    while (fIdx < state.song.frames.length && state.song.frames[fIdx].timeMs <= state.playheadMs) {
+      fIdx++;
+    }
+    state.frameIdx = fIdx;
+
+    pianoRoll.setSongData(state.song.segments, state.song.durationMs, { keepView: true });
+    updateSongDisplay();
+    updateUndoButtons();
+
+    if (actionLabel) {
+      appendLog(`[편집] ${actionLabel} (총 ${state.song.segments.length}개 음표)`);
+    }
+  }
+
+  function commitManualEdit(nextSegments, prioritySeg, actionLabel) {
+    if (!state.song) return;
+    state.undoStack.push(cloneSegments(state.song.segments));
+    if (state.undoStack.length > 50) state.undoStack.shift();
+    state.redoStack = [];
+    applyEditedSegments(nextSegments, prioritySeg, actionLabel);
+  }
+
+  function undoEdit() {
+    if (!state.song || state.undoStack.length === 0) return;
+    state.redoStack.push(cloneSegments(state.song.segments));
+    const prev = state.undoStack.pop();
+    applyEditedSegments(prev, null, '실행 취소');
+  }
+
+  function redoEdit() {
+    if (!state.song || state.redoStack.length === 0) return;
+    state.undoStack.push(cloneSegments(state.song.segments));
+    const next = state.redoStack.pop();
+    applyEditedSegments(next, null, '다시 실행');
+  }
+
+  function setEditorMode(mode) {
+    state.editorMode = mode === 'edit' ? 'edit' : 'seek';
+    const isEdit = state.editorMode === 'edit';
+    if (el.btnModeSeek) el.btnModeSeek.classList.toggle('active', !isEdit);
+    if (el.btnModeEdit) el.btnModeEdit.classList.toggle('active', isEdit);
+    if (el.pianoRollWrap) el.pianoRollWrap.classList.toggle('editing', isEdit);
+    if (el.editorHint) {
+      el.editorHint.classList.toggle('editing', isEdit);
+      el.editorHint.textContent = isEdit
+        ? '악보 편집: 빈 칸 좌클릭/드래그=음표 추가 · 음표 드래그=이동 · 오른쪽 끝 드래그=길이 조절 · 우클릭/Delete=삭제 · 휠=세로 이동 · Shift+휠=가로 스크롤 · 상단 눈금 클릭=구간 이동'
+        : '구간 이동: 캔버스를 클릭해 원하는 재생 위치로 이동합니다. 음표를 직접 수정하려면 [악보 편집]을 누르세요.';
+    }
+    pianoRoll.setMode(state.editorMode);
+  }
+
+  // ---------------------------------------------------------
   // 편곡 옵션(트랙·옥타브·스타카토) 변경 시 타임라인 재빌드
   // ---------------------------------------------------------
   function rebuildCurrentSong(preservePosition = false) {
+    if (state.isManuallyEdited) {
+      const ok = confirm(
+        '피아노 롤에서 직접 수정한 내용이 있습니다.\n자동 편곡/필터 옵션을 변경하면 수동 편집 내용이 초기화됩니다. 계속할까요?'
+      );
+      if (!ok) {
+        appendLog('[알림] 수동 편집 내용을 보호하기 위해 자동 재편곡을 취소했습니다.');
+        return;
+      }
+    }
     const prevMs = preservePosition ? state.playheadMs : 0;
     const wasPlaying = preservePosition && state.isPlaying;
 
@@ -236,6 +464,7 @@
         minDurationMs: state.minDurationMs,
         minVelocity: state.minVelocity,
         allocMode: state.allocMode,
+        voiceFillMode: state.voiceFillMode,
       });
       loadSong(timeline, preservePosition);
     } else if (state.presetKey && PRESETS[state.presetKey]) {
@@ -255,25 +484,25 @@
   // ---------------------------------------------------------
   function loadSong(song, silentLog = false) {
     stopPlayback();
-    state.song = song;
+    const segments = song.segments || framesToSegments(song.frames, song.durationMs);
+    state.song = { ...song, segments };
     state.playheadMs = 0;
     state.frameIdx = 0;
+    state.isManuallyEdited = !!song.isBlank;
+    state.minSongDurationMs = song.isBlank ? song.durationMs : 0;
+    state.undoStack = [];
+    state.redoStack = [];
 
-    el.songTitle.textContent = song.title;
-    el.songMeta.textContent = `4채널 프레임 ${song.frames.length.toLocaleString()}개 · 길이 ${formatTime(song.durationMs)}`;
     el.timeCurrent.textContent = '0:00';
-    el.timeTotal.textContent = formatTime(song.durationMs);
     el.seekBar.value = 0;
-    el.seekBar.disabled = song.frames.length === 0;
-    el.btnPlay.disabled = song.frames.length === 0;
     el.btnPause.disabled = true;
-    el.btnStop.disabled = song.frames.length === 0;
-    el.btnExportIno.disabled = song.frames.length === 0;
 
-    pianoRoll.setSongData(song.segments || framesToSegments(song.frames, song.durationMs), song.durationMs);
+    updateSongDisplay();
+    updateUndoButtons();
+    pianoRoll.setSongData(state.song.segments, state.song.durationMs);
 
     if (!silentLog) {
-      appendLog(`[곡 로드] "${song.title}" (${formatTime(song.durationMs)}, ${song.frames.length} 프레임)`);
+      appendLog(`[곡 로드] "${state.song.title}" (${formatTime(state.song.durationMs)}, ${state.song.frames.length} 프레임)`);
     }
   }
 
@@ -293,6 +522,7 @@
     }
     state.frameIdx = idx;
     pianoRoll.setPlayhead(clamped);
+    syncFsControls();
 
     if (state.isPlaying && idx > 0) {
       applyChannelNotes(frames[idx - 1].notes, true);
@@ -310,6 +540,7 @@
     state.lastTickPerfMs = performance.now();
     el.btnPlay.disabled = true;
     el.btnPause.disabled = false;
+    syncFsControls();
 
     const tick = (now) => {
       if (!state.isPlaying || !state.song) return;
@@ -319,15 +550,27 @@
       state.playheadMs += dt;
 
       const frames = state.song.frames;
+      let lastNotes = null;
+      const sawSilence = [false, false, false, false];
+      const retriggerMask = [false, false, false, false];
       while (state.frameIdx < frames.length && frames[state.frameIdx].timeMs <= state.playheadMs) {
-        applyChannelNotes(frames[state.frameIdx].notes);
+        const fn = frames[state.frameIdx].notes;
+        for (let ch = 0; ch < 4; ch++) {
+          if (fn[ch] === 0) sawSilence[ch] = true;
+          else if (sawSilence[ch]) retriggerMask[ch] = true;
+        }
+        lastNotes = fn;
         state.frameIdx++;
+      }
+      if (lastNotes) {
+        applyChannelNotes(lastNotes, false, retriggerMask);
       }
 
       const ratio = state.song.durationMs > 0 ? Math.min(1, state.playheadMs / state.song.durationMs) : 0;
       el.seekBar.value = Math.round(ratio * 1000);
       el.timeCurrent.textContent = formatTime(state.playheadMs);
       pianoRoll.setPlayhead(state.playheadMs);
+      syncFsControls();
 
       if (state.playheadMs >= state.song.durationMs) {
         stopPlayback();
@@ -347,6 +590,7 @@
     if (state.rafId) cancelAnimationFrame(state.rafId);
     el.btnPlay.disabled = false;
     el.btnPause.disabled = true;
+    syncFsControls();
     silenceAll();
   }
 
@@ -362,6 +606,7 @@
       el.btnPlay.disabled = false;
       el.btnPause.disabled = true;
     }
+    syncFsControls();
     silenceAll();
   }
 
@@ -372,7 +617,7 @@
     const beatMs = 60000 / bpm;
     const frames = [];
     let currentMs = 0;
-    const gapBase = Math.max(15, state.staccatoMs);
+    const gapBase = Math.max(25, state.staccatoMs);
 
     for (const step of steps) {
       const durMs = step.beats * beatMs;
@@ -535,7 +780,45 @@
   }
 
   window.addEventListener('keydown', (e) => {
-    if (e.repeat || e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+    if (e.key === 'Escape') {
+      if (el.helpModal && !el.helpModal.classList.contains('hidden')) {
+        e.preventDefault();
+        el.helpModal.classList.add('hidden');
+        return;
+      }
+      if (state.isFullscreenRoll) {
+        e.preventDefault();
+        setFullscreenRoll(false);
+        return;
+      }
+    }
+
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
+
+    // 편집 단축키 (Ctrl+Z / Ctrl+Y / Delete)
+    if (e.ctrlKey || e.metaKey) {
+      const k = e.key.toLowerCase();
+      if (k === 'z') {
+        e.preventDefault();
+        if (e.shiftKey) redoEdit();
+        else undoEdit();
+        return;
+      }
+      if (k === 'y') {
+        e.preventDefault();
+        redoEdit();
+        return;
+      }
+    }
+
+    if (state.editorMode === 'edit' && (e.key === 'Delete' || e.key === 'Backspace')) {
+      if (pianoRoll.deleteSelected()) {
+        e.preventDefault();
+        return;
+      }
+    }
+
+    if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
     const note = KEYBOARD_SHORTCUTS[e.key.toLowerCase()];
     if (note) {
       const keyEl = el.pianoKeyboard.querySelector(`[data-note="${note}"]`);
@@ -564,6 +847,9 @@
 
       // 4개 이하 트랙이면서 트랙이 정확히 4개인 경우에도 기본은 'auto'로 두되 트랙 표에서 바로 고정 가능
       renderTrackTable(raw);
+      if (raw.autoMapped) {
+        appendLog('[자동 매핑] 4축 트랙 이름 인식 → X / Y / Z / A 축에 자동 고정되었습니다.');
+      }
       const timeline = buildFourAxisTimeline(raw, {
         octaveShift: state.octaveShift,
         staccatoMs: state.staccatoMs,
@@ -571,6 +857,7 @@
         minDurationMs: state.minDurationMs,
         minVelocity: state.minVelocity,
         allocMode: state.allocMode,
+        voiceFillMode: state.voiceFillMode,
       });
       loadSong(timeline);
     } catch (err) {
@@ -610,7 +897,9 @@
   });
 
   el.volumeSlider.addEventListener('input', (e) => {
-    audio.setVolume(parseInt(e.target.value, 10) / 100);
+    const val = parseInt(e.target.value, 10);
+    audio.setVolume(val / 100);
+    if (el.volumeLabel) el.volumeLabel.textContent = `${val}%`;
   });
 
   // 채널별 단독 테스트 & 음소거
@@ -697,23 +986,31 @@
     el.transposeLabel.textContent = state.transpose > 0 ? `+${state.transpose}` : `${state.transpose}`;
   });
 
-  // 2단계: 옥타브 시프트, 스타카토, 가로 줌, 단독 .ino 내보내기
+  // 2단계: 옥타브 이동, 음표 끊김(스타카토), 가로 확대, 아두이노 .ino 저장
   el.octaveSelect.addEventListener('change', (e) => {
     state.octaveShift = parseInt(e.target.value, 10) || 0;
-    appendLog(`[편곡] 옥타브 시프트: ${state.octaveShift > 0 ? '+' : ''}${state.octaveShift}`);
+    appendLog(`[편곡] 옥타브 이동: ${state.octaveShift > 0 ? '+' : ''}${state.octaveShift}`);
     rebuildCurrentSong(true);
   });
 
   el.allocModeSelect.addEventListener('change', (e) => {
     state.allocMode = e.target.value || 'smart';
-    appendLog(`[편곡] 4성부 분배 방식: ${state.allocMode === 'smart' ? '스마트 분배' : '단순 높이순'}`);
+    appendLog(`[편곡] 4모터 분배 규칙: ${state.allocMode === 'smart' ? '계층 자동 분배' : '단순 음높이순'}`);
     rebuildCurrentSong(true);
   });
+
+  if (el.voiceFillSelect) {
+    el.voiceFillSelect.addEventListener('change', (e) => {
+      state.voiceFillMode = e.target.value || 'original';
+      appendLog(`[편곡] 빈 모터 화음 채우기: ${state.voiceFillMode === 'harmonize' ? '빈 축 화음 보강' : '원본 유지'}`);
+      rebuildCurrentSong(true);
+    });
+  }
 
   el.maxNoteSelect.addEventListener('change', (e) => {
     state.maxNote = parseInt(e.target.value, 10) || 91;
     const label = state.maxNote >= 127 ? '제한 없음' : midiToNoteName(state.maxNote);
-    appendLog(`[편곡] 고음 상한: ${label}`);
+    appendLog(`[편곡] 고음 제한: ${label}`);
     rebuildCurrentSong(true);
   });
 
@@ -722,7 +1019,7 @@
     el.staccatoLabel.textContent = `${state.staccatoMs}ms`;
   });
   el.staccatoSlider.addEventListener('change', () => {
-    appendLog(`[편곡] 스타카토 간격: ${state.staccatoMs}ms`);
+    appendLog(`[편곡] 음표 끊김(스타카토): ${state.staccatoMs}ms`);
     rebuildCurrentSong(true);
   });
 
@@ -738,9 +1035,134 @@
     rebuildCurrentSong(true);
   });
 
+  // 모든 재생·편곡·잡음 컷 설정을 기본값으로 원클릭 초기화
+  if (el.btnResetSettings) {
+    el.btnResetSettings.addEventListener('click', () => {
+      state.speed = 1.0;
+      state.transpose = 0;
+      state.octaveShift = 0;
+      state.allocMode = 'smart';
+      state.voiceFillMode = 'original';
+      state.maxNote = 91;
+      state.staccatoMs = 25;
+      state.minDurationMs = 0;
+      state.minVelocity = 0;
+
+      el.speedSlider.value = 100;
+      el.speedLabel.textContent = '1.0x';
+      el.transposeSlider.value = 0;
+      el.transposeLabel.textContent = '0';
+      el.octaveSelect.value = '0';
+      el.allocModeSelect.value = 'smart';
+      if (el.voiceFillSelect) el.voiceFillSelect.value = 'original';
+      el.maxNoteSelect.value = '91';
+      el.staccatoSlider.value = 25;
+      el.staccatoLabel.textContent = '25ms';
+      el.minDurSlider.value = 0;
+      el.minDurLabel.textContent = '0ms';
+      el.minVelSlider.value = 0;
+      el.minVelLabel.textContent = '0';
+
+      appendLog('[설정] 재생·편곡·잡음 컷 설정을 기본값으로 초기화했습니다.');
+      rebuildCurrentSong(true);
+    });
+  }
+
   el.zoomSlider.addEventListener('input', (e) => {
     pianoRoll.setZoom(parseInt(e.target.value, 10));
   });
+
+  if (el.pianoRollHScroll) {
+    el.pianoRollHScroll.addEventListener('scroll', () => {
+      const curLeft = Math.round(el.pianoRollHScroll.scrollLeft);
+      if (lastSyncedScrollPx >= 0 && Math.abs(curLeft - lastSyncedScrollPx) <= 1) {
+        lastSyncedScrollPx = -1;
+        return;
+      }
+      lastSyncedScrollPx = -1;
+      const ms = (el.pianoRollHScroll.scrollLeft / pianoRoll.pxPerSec) * 1000;
+      pianoRoll.setScrollMs(ms, true);
+    });
+  }
+
+  if (el.btnFullscreenRoll) {
+    el.btnFullscreenRoll.addEventListener('click', () => {
+      setFullscreenRoll(!state.isFullscreenRoll);
+    });
+  }
+  if (el.fsBtnPlay) el.fsBtnPlay.addEventListener('click', startPlayback);
+  if (el.fsBtnPause) el.fsBtnPause.addEventListener('click', pausePlayback);
+  if (el.fsBtnStop) el.fsBtnStop.addEventListener('click', stopPlayback);
+
+  // 4-1단계: 피아노 롤 에디터 툴바 이벤트 바인딩
+  if (el.btnModeSeek) el.btnModeSeek.addEventListener('click', () => setEditorMode('seek'));
+  if (el.btnModeEdit) el.btnModeEdit.addEventListener('click', () => setEditorMode('edit'));
+
+  document.querySelectorAll('.btn-axis').forEach((btn) => {
+    const ch = parseInt(btn.dataset.ch, 10);
+    btn.addEventListener('click', () => {
+      state.editChannel = ch;
+      document.querySelectorAll('.btn-axis').forEach((b) => {
+        b.classList.toggle('active', parseInt(b.dataset.ch, 10) === ch);
+      });
+      pianoRoll.setActiveChannel(ch);
+    });
+  });
+
+  if (el.editorBpmInput) {
+    el.editorBpmInput.addEventListener('change', (e) => {
+      const val = Math.max(40, Math.min(240, parseInt(e.target.value, 10) || 120));
+      e.target.value = val;
+      state.editorBpm = val;
+      pianoRoll.setBpm(val);
+    });
+  }
+
+  if (el.snapSelect) {
+    el.snapSelect.addEventListener('change', (e) => {
+      const val = parseInt(e.target.value, 10);
+      state.snapDiv = Number.isNaN(val) ? 4 : val;
+      pianoRoll.setSnapDiv(state.snapDiv);
+    });
+  }
+
+  if (el.btnPitchUp) el.btnPitchUp.addEventListener('click', () => pianoRoll.scrollPitch(4));
+  if (el.btnPitchDown) el.btnPitchDown.addEventListener('click', () => pianoRoll.scrollPitch(-4));
+  if (el.btnUndo) el.btnUndo.addEventListener('click', undoEdit);
+  if (el.btnRedo) el.btnRedo.addEventListener('click', redoEdit);
+
+  if (el.btnNewBlank) {
+    el.btnNewBlank.addEventListener('click', () => {
+      if (state.isManuallyEdited) {
+        const ok = confirm('현재 수동 편집 중인 내용이 있습니다. 새 빈 악보를 만들면 기존 작업이 초기화됩니다. 계속할까요?');
+        if (!ok) return;
+      }
+      state.rawMidi = null;
+      state.presetKey = null;
+      renderTrackTable(null);
+      loadSong({
+        title: '새 4성부 악보',
+        durationMs: 16000,
+        frames: [],
+        segments: [],
+        isBlank: true,
+      });
+      setEditorMode('edit');
+      appendLog('[에디터] 새 4성부 빈 악보(16초)를 생성하고 편집 모드로 전환했습니다.');
+    });
+  }
+
+  if (el.btnExportMidi) {
+    el.btnExportMidi.addEventListener('click', () => {
+      if (!state.song || !state.song.segments || state.song.segments.length === 0) return;
+      const res = window.MidiExporter.downloadMidi(state.song, {
+        bpm: state.editorBpm,
+        transpose: state.transpose,
+        channelMuted: state.channelMuted,
+      });
+      appendLog(`[MIDI 저장] ${res.filename} 다운로드 완료 (${res.noteCount}개 음표, ${res.byteLength.toLocaleString()} bytes)`);
+    });
+  }
 
   el.btnExportIno.addEventListener('click', () => {
     if (!state.song || state.song.frames.length === 0) return;
@@ -755,6 +1177,31 @@
       : '';
     appendLog(`[내보내기] ${res.filename} 생성 완료 — ${res.eventCount}개 이벤트${warn}`);
   });
+
+  if (el.btnOpenHelp && el.helpModal) {
+    el.btnOpenHelp.addEventListener('click', () => {
+      el.helpModal.classList.remove('hidden');
+    });
+  }
+  if (el.btnCloseHelp && el.helpModal) {
+    el.btnCloseHelp.addEventListener('click', () => {
+      el.helpModal.classList.add('hidden');
+    });
+  }
+  if (el.helpModal) {
+    el.helpModal.addEventListener('click', (e) => {
+      if (e.target === el.helpModal) {
+        el.helpModal.classList.add('hidden');
+      }
+    });
+  }
+
+  if (el.btnToggleLog && el.serialLog) {
+    el.btnToggleLog.addEventListener('click', () => {
+      const collapsed = el.serialLog.classList.toggle('hidden');
+      el.btnToggleLog.textContent = collapsed ? '로그 펼치기' : '로그 접기';
+    });
+  }
 
   el.btnClearLog.addEventListener('click', () => {
     el.serialLog.textContent = '';
@@ -787,9 +1234,9 @@
   }
 
   function getModeDisplayLabel(mode) {
-    if (mode === 'stems') return '고품질 4트랙 · Demucs AI 악기 분리 (약 2~4분 소요)';
-    if (mode === 'detail') return '빠른 4트랙 · 디테일 모드';
-    return '빠른 4트랙 · 큰 줄기·드럼 제거 모드';
+    if (mode === 'stems') return '고품질 변환 (드럼 제거 · 권장, 약 2~4분 소요)';
+    if (mode === 'detail') return '디테일 보존 (원음 그대로)';
+    return '빠른 변환 (원음 클린)';
   }
 
   async function loadMidiBufferFromBackend(arrayBuffer, songTitle, savedName) {
@@ -797,6 +1244,9 @@
     state.rawMidi = raw;
     state.presetKey = null;
     renderTrackTable(raw);
+    if (raw.autoMapped) {
+      appendLog('[자동 매핑] 4축 트랙 이름 인식 → X / Y / Z / A 축에 자동 고정되었습니다.');
+    }
     const timeline = buildFourAxisTimeline(raw, {
       octaveShift: state.octaveShift,
       staccatoMs: state.staccatoMs,
@@ -804,6 +1254,7 @@
       minDurationMs: state.minDurationMs,
       minVelocity: state.minVelocity,
       allocMode: state.allocMode,
+      voiceFillMode: state.voiceFillMode,
     });
     loadSong(timeline);
     setConvertStatus(`변환 완료! "${songTitle}" (저장됨: MidiMoter/midi/${savedName})`, 'ok');

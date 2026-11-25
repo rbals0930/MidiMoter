@@ -115,6 +115,145 @@
   }
 
   /**
+   * 편집된 세그먼트 배열에서 같은 축(채널)의 겹침을 자동 절단해 단선율 유지
+   * prioritySeg가 지정되면 해당 음표를 우선 보존하고 겹치는 기존 음표를 자르거나 분할함
+   */
+  function normalizeEditedSegments(segments, prioritySeg = null) {
+    const MIN_LEN_MS = 25;
+    let list = (segments || [])
+      .filter((s) => s && s.ch >= 0 && s.ch <= 3 && s.note > 0 && s.endMs - s.startMs >= MIN_LEN_MS)
+      .map((s) => ({
+        ch: s.ch,
+        note: Math.max(24, Math.min(108, Math.round(s.note))),
+        startMs: Math.max(0, s.startMs),
+        endMs: Math.max(0, s.endMs),
+      }));
+
+    if (prioritySeg) {
+      const p = {
+        ch: prioritySeg.ch,
+        note: Math.max(24, Math.min(108, Math.round(prioritySeg.note))),
+        startMs: Math.max(0, prioritySeg.startMs),
+        endMs: Math.max(0, prioritySeg.endMs),
+      };
+      const resolved = [];
+      for (const s of list) {
+        if (s.ch !== p.ch) {
+          resolved.push(s);
+          continue;
+        }
+        // 겹치지 않는 경우 그대로 유지
+        if (s.endMs <= p.startMs || s.startMs >= p.endMs) {
+          resolved.push(s);
+          continue;
+        }
+        // 기존 음이 새 음의 양쪽을 모두 감싸는 경우 좌우 분할
+        if (s.startMs < p.startMs && s.endMs > p.endMs) {
+          if (p.startMs - s.startMs >= MIN_LEN_MS) {
+            resolved.push({ ...s, endMs: p.startMs });
+          }
+          if (s.endMs - p.endMs >= MIN_LEN_MS) {
+            resolved.push({ ...s, startMs: p.endMs });
+          }
+        } else if (s.startMs < p.startMs) {
+          if (p.startMs - s.startMs >= MIN_LEN_MS) {
+            resolved.push({ ...s, endMs: p.startMs });
+          }
+        } else if (s.endMs > p.endMs) {
+          if (s.endMs - p.endMs >= MIN_LEN_MS) {
+            resolved.push({ ...s, startMs: p.endMs });
+          }
+        }
+        // 기존 음이 새 음 안에 완전히 포함되면 삭제
+      }
+      if (p.endMs - p.startMs >= MIN_LEN_MS) {
+        resolved.push(p);
+      }
+      list = resolved;
+    }
+
+    // 채널별 시간순 정렬 및 잔여 미세 겹침 정리
+    list.sort((a, b) => a.ch - b.ch || a.startMs - b.startMs);
+    const cleaned = [];
+    for (let ch = 0; ch < 4; ch++) {
+      const chSegs = list.filter((s) => s.ch === ch);
+      for (let i = 0; i < chSegs.length; i++) {
+        const cur = { ...chSegs[i] };
+        if (i + 1 < chSegs.length && cur.endMs > chSegs[i + 1].startMs) {
+          cur.endMs = chSegs[i + 1].startMs;
+        }
+        if (cur.endMs - cur.startMs >= MIN_LEN_MS) {
+          cleaned.push(cur);
+        }
+      }
+    }
+
+    cleaned.sort((a, b) => a.startMs - b.startMs || a.ch - b.ch);
+    return cleaned;
+  }
+
+  /**
+   * 4채널 세그먼트 배열 -> 시퀀서 재생용 frames 배열 및 durationMs 역변환
+   */
+  function segmentsToFrames(segments, minDurationMs = 0) {
+    const cleanSegs = normalizeEditedSegments(segments);
+    const events = [];
+    let maxEndMs = 0;
+
+    for (const s of cleanSegs) {
+      if (s.endMs > maxEndMs) maxEndMs = s.endMs;
+      events.push({ timeMs: s.startMs, type: 'on', ch: s.ch, note: s.note });
+      events.push({ timeMs: s.endMs, type: 'off', ch: s.ch, note: s.note });
+    }
+
+    // 동일 시각에는 off를 on보다 먼저 처리
+    events.sort((a, b) => {
+      if (Math.abs(a.timeMs - b.timeMs) > 0.5) return a.timeMs - b.timeMs;
+      if (a.type === b.type) return a.ch - b.ch;
+      return a.type === 'off' ? -1 : 1;
+    });
+
+    const curNotes = [0, 0, 0, 0];
+    const frames = [];
+    let idx = 0;
+
+    while (idx < events.length) {
+      const t = events[idx].timeMs;
+      while (idx < events.length && events[idx].timeMs - t <= 0.5) {
+        const ev = events[idx++];
+        if (ev.type === 'on') {
+          curNotes[ev.ch] = ev.note;
+        } else if (curNotes[ev.ch] === ev.note) {
+          curNotes[ev.ch] = 0;
+        }
+      }
+
+      const snap = [...curNotes];
+      const last = frames[frames.length - 1];
+      if (
+        !last ||
+        last.notes[0] !== snap[0] ||
+        last.notes[1] !== snap[1] ||
+        last.notes[2] !== snap[2] ||
+        last.notes[3] !== snap[3]
+      ) {
+        frames.push({ timeMs: t, notes: snap });
+      }
+    }
+
+    const durationMs = Math.max(minDurationMs, maxEndMs > 0 ? maxEndMs + 200 : 0);
+    if (frames.length > 0 && frames[frames.length - 1].notes.some((n) => n !== 0)) {
+      frames.push({ timeMs: durationMs, notes: [0, 0, 0, 0] });
+    }
+
+    return {
+      frames,
+      segments: cleanSegs,
+      durationMs,
+    };
+  }
+
+  /**
    * ArrayBuffer 형태의 표준 MIDI 파일 파싱 (트랙별 원시 이벤트 보존)
    */
   function parseMidiRaw(buffer, title = 'MIDI 곡') {
@@ -303,18 +442,79 @@
       };
     });
 
+    // 4트랙 축 이름 패턴(X-Axis, Y-Axis, Z-Axis, A-Axis 등)이 2개 이상 감지되면 자동으로 축 고정 매핑
+    const axisMatches = tracks.map((tr) => {
+      if (/^(?:X[-_\s]|X-Axis)/i.test(tr.name)) return '0';
+      if (/^(?:Y[-_\s]|Y-Axis)/i.test(tr.name)) return '1';
+      if (/^(?:Z[-_\s]|Z-Axis)/i.test(tr.name)) return '2';
+      if (/^(?:A[-_\s]|A-Axis)/i.test(tr.name)) return '3';
+      return null;
+    });
+    let autoMapped = false;
+    if (axisMatches.filter((m) => m !== null).length >= 2) {
+      const usedAxes = new Set();
+      tracks.forEach((tr, i) => {
+        const ax = axisMatches[i];
+        if (ax !== null && !usedAxes.has(ax)) {
+          tr.targetAxis = ax;
+          usedAxes.add(ax);
+          autoMapped = true;
+        }
+      });
+    }
+
     return {
       title,
       format,
       numTracks: tracks.length,
+      autoMapped,
       tracks,
     };
   }
 
   /**
-   * 트랙 설정 + 옥타브 시프트 + 고음 상한 + 잡음 제거(최소 길이/강도) + 분배 모드 + 스타카토 반영
+   * 채널별 독립 스타카토/게이트 적용
+   * - 전역 프레임 단위가 아니라 각 축의 세그먼트 단위로 계산해
+   *   음정 전환과 같은 음 연타 모두에 확실한 무음 틈 삽입
+   */
+  function applyChannelStaccato(segments, staccatoMs) {
+    if (!segments || segments.length === 0 || !staccatoMs || staccatoMs <= 0) {
+      return segments || [];
+    }
+
+    const result = [];
+    for (let ch = 0; ch < 4; ch++) {
+      const chSegs = segments
+        .filter((s) => s.ch === ch)
+        .sort((a, b) => a.startMs - b.startMs)
+        .map((s) => ({ ...s }));
+
+      for (let i = 0; i < chSegs.length; i++) {
+        const cur = chSegs[i];
+        if (i + 1 < chSegs.length) {
+          const nxt = chSegs[i + 1];
+          const origDur = cur.endMs - cur.startMs;
+          // 짧은 음표가 최소 길이(25ms) 미만으로 떨어져 탈락하지 않도록 보호
+          const minKeep = origDur >= 25 ? Math.max(25, Math.min(55, origDur * 0.6)) : origDur;
+          const targetEnd = nxt.startMs - staccatoMs;
+          if (targetEnd < cur.endMs) {
+            cur.endMs = Math.max(cur.startMs + minKeep, targetEnd);
+          }
+        }
+        if (cur.endMs > cur.startMs) {
+          result.push(cur);
+        }
+      }
+    }
+
+    result.sort((a, b) => a.startMs - b.startMs || a.ch - b.ch);
+    return result;
+  }
+
+  /**
+   * 트랙 설정 + 옥타브 시프트 + 고음 상한 + 잡음 제거(최소 길이/강도) + 분배/보강 모드 + 스타카토 반영
    * @param {object} parsedMidi parseMidiRaw() 반환 객체
-   * @param {object} options { octaveShift, staccatoMs, maxNote, minDurationMs, minVelocity, allocMode }
+   * @param {object} options { octaveShift, staccatoMs, maxNote, minDurationMs, minVelocity, allocMode, voiceFillMode }
    */
   function buildFourAxisTimeline(parsedMidi, options = {}) {
     const octaveShift = options.octaveShift || 0;
@@ -323,6 +523,7 @@
     const minDurationMs = Math.max(0, options.minDurationMs || 0);
     const minVelocity = Math.max(0, options.minVelocity || 0);
     const allocMode = options.allocMode || 'smart'; // 'smart' | 'pitch'
+    const voiceFillMode = options.voiceFillMode || 'original'; // 'original' | 'harmonize'
 
     // 활성화된 트랙에서 잡음 필터(최소 길이/최소 강도)를 통과한 음표만 on/off 이벤트로 전개
     const merged = [];
@@ -366,6 +567,24 @@
       return Math.max(24, Math.min(108, n));
     }
 
+    // auto 트랙 전체 음역 분포에서 4단 계층(베이스/미들/멜로디/하이) 경계 1회 산출
+    const autoPitches = [];
+    for (const ev of merged) {
+      if (ev.type === 'on' && ev.targetAxis === 'auto') {
+        autoPitches.push(shiftAndClamp(ev.note));
+      }
+    }
+    let autoBassMax = 48;
+    let autoMidMax = 58;
+    let autoMelMax = 70;
+    if (autoPitches.length > 0) {
+      autoPitches.sort((a, b) => a - b);
+      const pct = (ratio) => autoPitches[Math.min(autoPitches.length - 1, Math.floor((autoPitches.length - 1) * ratio))];
+      autoBassMax = Math.max(46, Math.min(53, pct(0.25)));
+      autoMidMax = Math.max(autoBassMax + 7, Math.min(64, pct(0.55)));
+      autoMelMax = Math.max(autoMidMax + 7, Math.min(74, pct(0.82)));
+    }
+
     function getBucketCandidates(map) {
       // 동일 보정 피치가 여러 개면 가장 강한 velocity 유지
       const byPitch = new Map();
@@ -380,8 +599,9 @@
       return Array.from(byPitch.entries()).map(([pitch, vel]) => ({ pitch, vel }));
     }
 
-    // 이전 프레임의 4축 음표 기억 (Voice Locking 연속성 유지용)
+    // 이전 프레임의 4축 음표 및 단선율 솔로 연속 축 기억
     let prevResolved = [0, 0, 0, 0];
+    let lastSoloAxis = 1;
 
     function resolveFourAxes() {
       const result = [0, 0, 0, 0];
@@ -423,79 +643,185 @@
           }
         } else {
           // -------------------------------------------------------
-          // 스마트 4성부 분배 모드 (유튜브/풍부한 음원 AI 채보 최적화)
-          // 1) 1반음 충돌(배음/비브라토 오탐지) 제거: 더 강한 음만 생존
-          // 2) Salient Skyline(강한 최고음 멜로디) + 강한 베이스 + 핵심 화음 선별
-          // 3) Voice Locking: 이전 프레임에서 울리던 음은 같은 축에 고정 유지
+          // 스마트 4단 계층 비침범 분배 모드 (v6.0: 솔로 비분열 + X>Y>Z>A 적층)
+          // 1) 수동 축 및 1반음 충돌(배음/비브라토 오탐지) 제거
+          // 2) 단선율 솔로 음은 A축으로 빠지지 않고 Y/X 솔로 축에 연속 유지
+          // 3) 2~4성부 다성 구간은 X(하이) > Y(멜로디) > Z(미들) > A(베이스) 역전 없이 배치
           // -------------------------------------------------------
+          const fixedPitches = [];
+          for (let ch = 0; ch < 4; ch++) {
+            if (result[ch] > 0) fixedPitches.push(result[ch]);
+          }
+
           cands.sort((a, b) => b.vel - a.vel || b.pitch - a.pitch);
           const cleanCands = [];
           for (const c of cands) {
-            const clashes = cleanCands.some((kept) => Math.abs(kept.pitch - c.pitch) === 1);
-            if (!clashes) cleanCands.push(c);
+            if (fixedPitches.some((fp) => Math.abs(fp - c.pitch) <= 1)) continue;
+            if (!cleanCands.some((kept) => Math.abs(kept.pitch - c.pitch) <= 1)) {
+              cleanCands.push(c);
+            }
           }
 
           const k = emptyAxes.length;
-          let selected = [];
-
-          if (cleanCands.length <= k) {
-            selected = cleanCands.map((c) => c.pitch);
-          } else {
-            const maxVel = cleanCands[0].vel || 1;
-            const pool = [...cleanCands];
-
-            // (a) 주멜로디 후보: 최대 음량의 65% 이상인 뚜렷한 음 중 가장 높은 음 (약한 고음 배음 무시)
-            const melodyPool = pool.filter((c) => c.vel >= maxVel * 0.65);
-            const melPick = (melodyPool.length > 0 ? melodyPool : pool).reduce((best, cur) =>
-              cur.pitch > best.pitch ? cur : best
-            );
-            selected.push(melPick.pitch);
-            pool.splice(pool.indexOf(melPick), 1);
-
-            // (b) 베이스 후보: A축이 비어있고 음이 2개 이상 필요하면, 55% 이상 강도의 가장 낮은 음 선택
-            if (selected.length < k && emptyAxes.includes(3) && pool.length > 0) {
-              const bassPool = pool.filter((c) => c.vel >= maxVel * 0.55);
-              const bassPick = (bassPool.length > 0 ? bassPool : pool).reduce((best, cur) =>
-                cur.pitch < best.pitch ? cur : best
-              );
-              selected.push(bassPick.pitch);
-              pool.splice(pool.indexOf(bassPick), 1);
+          if (cleanCands.length === 1) {
+            const soloPitch = cleanCands[0].pitch;
+            let pickAx = -1;
+            for (const ch of emptyAxes) {
+              if (prevResolved[ch] === soloPitch) {
+                pickAx = ch;
+                break;
+              }
             }
-
-            // (c) 나머지 화음 축: 음량(Velocity)이 가장 강한 핵심 화음 순으로 채움
-            pool.sort((a, b) => b.vel - a.vel || b.pitch - a.pitch);
-            while (selected.length < k && pool.length > 0) {
-              selected.push(pool.shift().pitch);
+            if (pickAx < 0) {
+              if (soloPitch <= autoBassMax - 4 && emptyAxes.includes(3)) {
+                pickAx = 3;
+              } else if (soloPitch > autoMelMax + 2 && emptyAxes.includes(0)) {
+                pickAx = 0;
+              } else if (soloPitch <= autoMidMax && emptyAxes.includes(1)) {
+                pickAx = 1;
+              } else if (emptyAxes.includes(lastSoloAxis)) {
+                pickAx = lastSoloAxis;
+              } else {
+                const order = [1, 0, 2, 3];
+                const found = order.find((ax) => emptyAxes.includes(ax));
+                pickAx = found !== undefined ? found : emptyAxes[0];
+              }
             }
-          }
-
-          // Voice Locking: 이전 프레임에서 이미 울리고 있던 음은 같은 축에 그대로 고정
-          const unassignedPitches = new Set(selected);
-          const remainingAxes = [];
-          for (const ch of emptyAxes) {
-            const prevPitch = prevResolved[ch];
-            if (prevPitch > 0 && unassignedPitches.has(prevPitch)) {
-              result[ch] = prevPitch;
-              unassignedPitches.delete(prevPitch);
+            if (pickAx >= 0) {
+              result[pickAx] = soloPitch;
+              if ((pickAx === 0 || pickAx === 1) && soloPitch > autoMidMax) {
+                lastSoloAxis = pickAx;
+              }
+            }
+          } else if (cleanCands.length >= 2) {
+            let picked = [];
+            if (cleanCands.length <= k) {
+              picked = cleanCands.map((c) => c.pitch);
             } else {
-              remainingAxes.push(ch);
-            }
-          }
+              const maxVel = cleanCands[0].vel || 1;
+              const pool = [...cleanCands];
 
-          // 새로 진입한 음표를 남은 축에 높이 역할순(최저음->A축, 고음->X·Y·Z축)으로 배치
-          const restSorted = Array.from(unassignedPitches).sort((a, b) => a - b);
-          if (remainingAxes.includes(3) && restSorted.length > 0) {
-            result[3] = restSorted.shift();
-          }
-          for (const ch of remainingAxes) {
-            if (result[ch] === 0 && restSorted.length > 0) {
-              result[ch] = restSorted.pop();
+              // (a) 주멜로디 후보: 최대 음량 65% 이상 중 최고음
+              const melodyPool = pool.filter((c) => c.vel >= maxVel * 0.65);
+              const melPick = (melodyPool.length > 0 ? melodyPool : pool).reduce((best, cur) =>
+                cur.pitch > best.pitch ? cur : best
+              );
+              picked.push(melPick.pitch);
+              pool.splice(pool.indexOf(melPick), 1);
+
+              // (b) 베이스 후보: A축(3)이 비어있으면 55% 이상 중 최저음
+              if (picked.length < k && emptyAxes.includes(3) && pool.length > 0) {
+                const bassPool = pool.filter((c) => c.vel >= maxVel * 0.55);
+                const bassPick = (bassPool.length > 0 ? bassPool : pool).reduce((best, cur) =>
+                  cur.pitch < best.pitch ? cur : best
+                );
+                picked.push(bassPick.pitch);
+                pool.splice(pool.indexOf(bassPick), 1);
+              }
+
+              // (c) 나머지 화음 축: 음량 순으로 채움
+              pool.sort((a, b) => b.vel - a.vel || b.pitch - a.pitch);
+              while (picked.length < k && pool.length > 0) {
+                picked.push(pool.shift().pitch);
+              }
+            }
+
+            // 높은 음 -> 낮은 음 내림차순 정렬로 X > Y > Z > A 보장
+            picked.sort((a, b) => b - a);
+
+            if (k === 4) {
+              if (picked.length === 2) {
+                const [hi, lo] = picked;
+                if (lo <= autoBassMax + 3) {
+                  result[3] = lo;
+                  result[hi > autoMelMax ? 0 : 1] = hi;
+                } else if (hi > autoMelMax) {
+                  result[0] = hi;
+                  result[lo > autoMidMax ? 1 : 2] = lo;
+                } else {
+                  result[1] = hi;
+                  result[2] = lo;
+                }
+              } else if (picked.length === 3) {
+                const [hi, mid, lo] = picked;
+                if (lo <= autoBassMax + 3) {
+                  result[3] = lo;
+                  if (hi > autoMelMax) {
+                    result[0] = hi;
+                    result[mid > autoMidMax ? 1 : 2] = mid;
+                  } else {
+                    result[1] = hi;
+                    result[2] = mid;
+                  }
+                } else {
+                  result[0] = hi;
+                  result[1] = mid;
+                  result[2] = lo;
+                }
+              } else {
+                result[0] = picked[0];
+                result[1] = picked[1];
+                result[2] = picked[2];
+                result[3] = picked[3];
+              }
+            } else {
+              // 일부 축이 수동 고정된 혼합 매핑
+              let remAxes = [...emptyAxes];
+              if (remAxes.includes(3) && picked[picked.length - 1] <= autoBassMax + 3) {
+                result[3] = picked.pop();
+                remAxes = remAxes.filter((ax) => ax !== 3);
+              }
+              if (picked.length === 2 && remAxes.length === 3 && remAxes[0] === 0 && remAxes[1] === 1 && remAxes[2] === 2) {
+                const [hi, lo] = picked;
+                if (hi > autoMelMax) {
+                  result[0] = hi;
+                  result[lo > autoMidMax ? 1 : 2] = lo;
+                } else {
+                  result[1] = hi;
+                  result[2] = lo;
+                }
+              } else {
+                for (let i = 0; i < picked.length && i < remAxes.length; i++) {
+                  result[remAxes[i]] = picked[i];
+                }
+              }
             }
           }
         }
       }
 
       prevResolved = [...result];
+
+      if (voiceFillMode === 'harmonize') {
+        const filled = [...result];
+        const hasCollision = (cand, arr) =>
+          arr.some((p) => p > 0 && (p === cand || Math.abs(p - cand) === 1));
+        const maxBound = Math.min(108, maxNote + octaveShift * 12);
+        const inRange = (p) => p >= 36 && p <= maxBound;
+
+        if (filled[0] > 0 && filled[3] > 0) {
+          const xNote = filled[0];
+          const aNote = filled[3];
+          if (filled[1] === 0) {
+            const yCands = [aNote + 19, aNote + 12, xNote - 12, aNote + 7];
+            const pickY = yCands.find((c) => inRange(c) && !hasCollision(c, filled));
+            if (pickY) filled[1] = pickY;
+          }
+          if (filled[2] === 0) {
+            const zCands = [aNote + 12, aNote + 7, xNote - 12, aNote + 19];
+            const pickZ = zCands.find((c) => inRange(c) && !hasCollision(c, filled));
+            if (pickZ) filled[2] = pickZ;
+          }
+        } else if (filled[0] > 0 && filled[1] === 0 && filled[2] === 0 && filled[3] === 0) {
+          const octDown = filled[0] - 12;
+          if (inRange(octDown)) filled[1] = octDown;
+        } else if (filled[0] > 0 && filled[1] > 0 && filled[2] === 0 && filled[3] === 0) {
+          const lowOct = Math.min(filled[0], filled[1]) - 12;
+          if (inRange(lowOct) && !hasCollision(lowOct, filled)) filled[3] = lowOct;
+        }
+        return filled;
+      }
+
       return result;
     }
 
@@ -534,46 +860,30 @@
       }
     }
 
-    // 스타카토 간격(ms) 적용: 음표가 전환되는 채널에 짧은 무음 틈 삽입
-    let finalFrames = rawFrames;
-    if (staccatoMs > 0 && rawFrames.length > 1) {
-      finalFrames = [];
-      for (let i = 0; i < rawFrames.length; i++) {
-        const cur = rawFrames[i];
-        finalFrames.push(cur);
+    const rawDurationMs = rawFrames.length > 0 ? rawFrames[rawFrames.length - 1].timeMs + 200 : 0;
 
-        if (i + 1 < rawFrames.length) {
-          const next = rawFrames[i + 1];
-          const dur = next.timeMs - cur.timeMs;
-          if (dur > 35) {
-            const gapNotes = [...cur.notes];
-            let needGap = false;
-            for (let ch = 0; ch < 4; ch++) {
-              // 현재 음이 울리고 있고 다음 프레임에서 다른 음으로 바뀔 때 짧은 숨표 삽입
-              if (cur.notes[ch] > 0 && next.notes[ch] > 0 && cur.notes[ch] !== next.notes[ch]) {
-                gapNotes[ch] = 0;
-                needGap = true;
-              }
-            }
-            if (needGap) {
-              const gap = Math.min(staccatoMs, dur * 0.35);
-              finalFrames.push({ timeMs: next.timeMs - gap, notes: gapNotes });
-            }
-          }
-        }
-      }
+    // 채널별 독립 스타카토 간격(ms) 적용: 음정 전환 및 같은 음 연타 모두에 무음 틈 삽입
+    if (staccatoMs > 0 && rawFrames.length > 0) {
+      const rawSegments = framesToSegments(rawFrames, rawDurationMs);
+      const articulatedSegs = applyChannelStaccato(rawSegments, staccatoMs);
+      const rebuilt = segmentsToFrames(articulatedSegs, rawDurationMs);
+      return {
+        title: parsedMidi.title,
+        durationMs: rebuilt.durationMs,
+        frames: rebuilt.frames,
+        segments: rebuilt.segments,
+      };
     }
 
-    const durationMs = finalFrames.length > 0 ? finalFrames[finalFrames.length - 1].timeMs + 200 : 0;
-    if (finalFrames.length > 0 && finalFrames[finalFrames.length - 1].notes.some((n) => n !== 0)) {
-      finalFrames.push({ timeMs: durationMs, notes: [0, 0, 0, 0] });
+    if (rawFrames.length > 0 && rawFrames[rawFrames.length - 1].notes.some((n) => n !== 0)) {
+      rawFrames.push({ timeMs: rawDurationMs, notes: [0, 0, 0, 0] });
     }
 
     return {
       title: parsedMidi.title,
-      durationMs,
-      frames: finalFrames,
-      segments: framesToSegments(finalFrames, durationMs),
+      durationMs: rawDurationMs,
+      frames: rawFrames,
+      segments: framesToSegments(rawFrames, rawDurationMs),
     };
   }
 
@@ -589,7 +899,10 @@
     midiToNoteName,
     normalizeStepperPitch,
     allocateFourVoices,
+    applyChannelStaccato,
     framesToSegments,
+    normalizeEditedSegments,
+    segmentsToFrames,
     parseMidiRaw,
     buildFourAxisTimeline,
     parseMidiArrayBuffer,

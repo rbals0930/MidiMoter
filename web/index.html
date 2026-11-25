@@ -10,26 +10,30 @@
   <header class="top-bar">
     <div class="brand">
       <h1>MidiMoter</h1>
-      <span class="badge">4-Axis Stepper Synth · v3.0</span>
+      <span class="badge">4-Axis Stepper Synth · v6.0</span>
     </div>
     <div class="serial-controls">
+      <button id="btnOpenHelp" class="btn btn-secondary" type="button" title="모든 버튼·설정 설명 및 장르별 추천값 보기">기능 안내</button>
       <span id="serialStatus" class="status-pill disconnected">미연결</span>
-      <button id="btnConnect" class="btn btn-primary">시리얼 연결</button>
-      <button id="btnDisconnect" class="btn btn-secondary" disabled>연결 해제</button>
-      <button id="btnHardwareTest" class="btn btn-accent" disabled title="X→Y→Z→A 순서로 도미솔도 테스트">4축 자체 테스트</button>
-      <button id="btnEmergencyStop" class="btn btn-danger">전체 정지 (S)</button>
+      <button id="btnConnect" class="btn btn-primary" title="USB로 연결된 Arduino Uno 보드에 시리얼 연결(115200bps)">시리얼 연결</button>
+      <button id="btnDisconnect" class="btn btn-secondary" disabled title="현재 시리얼 연결을 안전하게 종료합니다">연결 해제</button>
+      <button id="btnHardwareTest" class="btn btn-accent" disabled title="X → Y → Z → A 순서로 각 모터의 기본 음계를 시험 구동합니다">4축 자체 테스트</button>
+      <button id="btnEmergencyStop" class="btn btn-danger" title="모든 모터와 PC 스피커 출력을 즉시 0Hz로 정지합니다">전체 정지</button>
     </div>
   </header>
 
   <main class="container">
-    <!-- 4축 실시간 상태 모니터 -->
+    <!-- ① 모터 상태 & 출력 설정 -->
     <section class="card">
       <div class="card-header">
-        <h2>4채널 스텝모터 상태</h2>
+        <div class="card-title-wrap">
+          <span class="step-badge">1</span>
+          <h2>모터 상태 &amp; 출력 설정</h2>
+        </div>
         <div class="inline-options">
-          <label class="option-item">
-            <span>마이크로스텝 배율</span>
-            <select id="microstepSelect" title="CNC Shield 점퍼 설정에 맞춰 배율 선택">
+          <label class="option-item" title="CNC Shield 점퍼(MS1/MS2/MS3) 설정에 맞춰 주파수 배율을 보정합니다">
+            <span>스텝 분주 (점퍼 설정)</span>
+            <select id="microstepSelect">
               <option value="1" selected>1/1 (풀스텝 권장)</option>
               <option value="2">1/2 (하프스텝)</option>
               <option value="4">1/4</option>
@@ -37,13 +41,14 @@
               <option value="16">1/16</option>
             </select>
           </label>
-          <label class="option-item toggle-label">
+          <label class="option-item toggle-label" title="아두이노 없이도 PC 스피커로 4성부 소리를 미리 들어봅니다">
             <input type="checkbox" id="chkAudioPreview" checked />
-            <span>브라우저 미리듣기 (PC 스피커)</span>
+            <span>PC 미리듣기</span>
           </label>
-          <label class="option-item">
-            <span>음량</span>
+          <label class="option-item" title="PC 미리듣기 출력 음량 조절">
+            <span>PC 음량</span>
             <input type="range" id="volumeSlider" min="0" max="100" value="30" />
+            <strong id="volumeLabel" class="fixed-val">30%</strong>
           </label>
         </div>
       </div>
@@ -52,39 +57,39 @@
         <div class="channel-card" data-ch="0" id="chCard0">
           <div class="ch-top">
             <span class="ch-name">CH 0 · X축</span>
-            <span class="ch-role">주멜로디 (최고음)</span>
+            <span class="ch-role">하이 (최고음 리드)</span>
           </div>
           <div class="ch-note" id="chNote0">—</div>
           <div class="ch-freq" id="chFreq0">0.0 Hz</div>
           <div class="ch-actions">
-            <button class="btn-mini btn-test-ch" data-ch="0">단독 테스트</button>
-            <button class="btn-mini btn-mute-ch" data-ch="0">음소거</button>
+            <button class="btn-mini btn-test-ch" data-ch="0" type="button">단독 테스트</button>
+            <button class="btn-mini btn-mute-ch" data-ch="0" type="button">음소거</button>
           </div>
         </div>
 
         <div class="channel-card" data-ch="1" id="chCard1">
           <div class="ch-top">
             <span class="ch-name">CH 1 · Y축</span>
-            <span class="ch-role">화음 1 (중고음)</span>
+            <span class="ch-role">멜로디 (중고음)</span>
           </div>
           <div class="ch-note" id="chNote1">—</div>
           <div class="ch-freq" id="chFreq1">0.0 Hz</div>
           <div class="ch-actions">
-            <button class="btn-mini btn-test-ch" data-ch="1">단독 테스트</button>
-            <button class="btn-mini btn-mute-ch" data-ch="1">음소거</button>
+            <button class="btn-mini btn-test-ch" data-ch="1" type="button">단독 테스트</button>
+            <button class="btn-mini btn-mute-ch" data-ch="1" type="button">음소거</button>
           </div>
         </div>
 
         <div class="channel-card" data-ch="2" id="chCard2">
           <div class="ch-top">
             <span class="ch-name">CH 2 · Z축</span>
-            <span class="ch-role">화음 2 (중저음)</span>
+            <span class="ch-role">미들 (중저음 화음)</span>
           </div>
           <div class="ch-note" id="chNote2">—</div>
           <div class="ch-freq" id="chFreq2">0.0 Hz</div>
           <div class="ch-actions">
-            <button class="btn-mini btn-test-ch" data-ch="2">단독 테스트</button>
-            <button class="btn-mini btn-mute-ch" data-ch="2">음소거</button>
+            <button class="btn-mini btn-test-ch" data-ch="2" type="button">단독 테스트</button>
+            <button class="btn-mini btn-mute-ch" data-ch="2" type="button">음소거</button>
           </div>
         </div>
 
@@ -96,62 +101,82 @@
           <div class="ch-note" id="chNote3">—</div>
           <div class="ch-freq" id="chFreq3">0.0 Hz</div>
           <div class="ch-actions">
-            <button class="btn-mini btn-test-ch" data-ch="3">단독 테스트</button>
-            <button class="btn-mini btn-mute-ch" data-ch="3">음소거</button>
+            <button class="btn-mini btn-test-ch" data-ch="3" type="button">단독 테스트</button>
+            <button class="btn-mini btn-mute-ch" data-ch="3" type="button">음소거</button>
           </div>
         </div>
       </div>
     </section>
 
-    <!-- 곡 선택 및 MIDI 플레이어 -->
+    <!-- ② 곡 불러오기 (MIDI 파일 · 내장 곡 · 유튜브 AI) -->
     <section class="card">
       <div class="card-header">
-        <h2>곡 선택 및 4성부 MIDI 플레이어</h2>
-        <div class="inline-options">
-          <span id="backendStatus" class="status-pill disconnected" title="backend/start_server.bat 실행 시 유튜브/MP3 AI 변환 가능">AI 서버 미연결</span>
-          <button id="btnCheckBackend" class="btn-mini" type="button">서버 재확인</button>
+        <div class="card-title-wrap">
+          <span class="step-badge">2</span>
+          <h2>곡 불러오기 <span class="title-sub">(MIDI · 내장 데모 · 유튜브 AI)</span></h2>
         </div>
+        <span class="hint">외부 악보 파일(.mid)이 가장 깔끔하며, 없을 때는 AI 변환을 보조로 활용하세요.</span>
       </div>
 
-      <!-- 3단계: 유튜브 URL 및 MP3/WAV AI 변환 바 -->
-      <div class="ai-convert-bar">
-        <div class="ai-input-group">
-          <input type="url" id="youtubeUrlInput" placeholder="유튜브 URL을 붙여넣으세요 (예: https://youtu.be/...)" />
-          <select id="aiModeSelect" title="변환 품질과 속도를 선택하세요. 모든 모드가 4트랙 MIDI로 자동 분리됩니다.">
-            <option value="clean" selected>빠른 4트랙 (큰 줄기·드럼 제거)</option>
-            <option value="stems">고품질 4트랙 (Demucs AI 악기 분리)</option>
-            <option value="detail">빠른 4트랙 (디테일 감도)</option>
-          </select>
-          <button id="btnConvertYoutube" class="btn btn-accent" type="button">유튜브 → 4성부 변환</button>
-          <input type="file" id="audioFileInput" accept=".mp3,.wav,.m4a,.ogg,.flac" hidden />
-          <button id="btnBrowseAudio" class="btn btn-secondary" type="button">MP3/WAV AI 변환</button>
-        </div>
-        <div id="convertStatus" class="convert-status">
-          ※ 유튜브/오디오 AI 변환을 쓰려면 <code>MidiMoter/backend/start_server.bat</code>를 먼저 실행하세요. (MIDI 파일은 서버 없이 바로 재생 가능)
-        </div>
-      </div>
-
+      <!-- 추천 1순위: MIDI 파일 드래그 & 내장 데모 곡 -->
       <div class="song-source-row">
         <div id="dropZone" class="drop-zone">
           <input type="file" id="midiFileInput" accept=".mid,.midi" hidden />
-          <p><strong>MIDI 파일(.mid)</strong>을 여기에 끌어다 놓거나 <button id="btnBrowseMidi" class="link-btn" type="button">파일 선택</button></p>
-          <p class="sub-hint">다성부 MIDI를 자동으로 X(멜로디)·Y·Z(화음)·A(베이스) 4채널에 분배합니다.</p>
+          <p><strong>MIDI 파일(.mid) 불러오기</strong> <span class="rec-tag">최고 음질 추천</span></p>
+          <p>파일을 여기에 끌어다 놓거나 <button id="btnBrowseMidi" class="link-btn" type="button">파일 선택</button></p>
+          <p class="sub-hint">5~16트랙 외부 악보도 X(하이)·Y(멜로디)·Z(미들)·A(베이스)에 자동 분배됩니다.</p>
         </div>
 
         <div class="preset-box">
-          <h3>내장 4성부 테스트 곡</h3>
+          <h3>내장 데모 곡 (바로 재생 가능)</h3>
           <div class="preset-buttons">
-            <button class="btn btn-secondary btn-preset" data-preset="canon">캐논 변주곡 (4성부 발췌)</button>
-            <button class="btn btn-secondary btn-preset" data-preset="tetris">테트리스 테마 (Korobeiniki)</button>
-            <button class="btn btn-secondary btn-preset" data-preset="chord">4축 화음 진행 테스트</button>
+            <button class="btn btn-secondary btn-preset" data-preset="canon" type="button">캐논 변주곡 (4성부 발췌)</button>
+            <button class="btn btn-secondary btn-preset" data-preset="tetris" type="button">테트리스 테마 (Korobeiniki)</button>
+            <button class="btn btn-secondary btn-preset" data-preset="chord" type="button">4축 화음 진행 테스트</button>
           </div>
         </div>
+      </div>
+
+      <!-- 보조 소스: 유튜브 URL 및 MP3/WAV AI 자동 변환 -->
+      <div class="ai-convert-bar">
+        <div class="ai-bar-header">
+          <span class="ai-bar-title">유튜브 · 오디오 AI 변환 <small>(악보 파일이 없을 때 보조 사용)</small></span>
+          <div class="inline-options">
+            <span id="backendStatus" class="status-pill disconnected" title="backend/start_server.bat 실행 시 유튜브/MP3 AI 변환 가능">AI 서버 미연결</span>
+            <button id="btnCheckBackend" class="btn-mini" type="button">서버 확인</button>
+          </div>
+        </div>
+        <div class="ai-input-group">
+          <input type="url" id="youtubeUrlInput" placeholder="유튜브 URL을 붙여넣으세요 (예: https://youtu.be/...)" />
+          <select id="aiModeSelect" title="드럼이 강한 곡은 고품질 변환(드럼 제거)을 권장합니다">
+            <option value="clean" selected>빠른 변환 (원음 클린)</option>
+            <option value="stems">고품질 변환 (드럼 제거 · 권장)</option>
+            <option value="detail">디테일 보존 (원음 그대로)</option>
+          </select>
+          <button id="btnConvertYoutube" class="btn btn-accent" type="button">유튜브 변환</button>
+          <input type="file" id="audioFileInput" accept=".mp3,.wav,.m4a,.ogg,.flac" hidden />
+          <button id="btnBrowseAudio" class="btn btn-secondary" type="button">MP3/WAV 변환</button>
+        </div>
+        <div id="convertStatus" class="convert-status">
+          ※ <code>backend/start_server.bat</code> 실행 시 활성화 · 드럼이 강한 곡은 <strong>[고품질 변환]</strong>을 권장합니다.
+        </div>
+      </div>
+    </section>
+
+    <!-- ③ 재생 & 소리 다듬기 -->
+    <section class="card">
+      <div class="card-header">
+        <div class="card-title-wrap">
+          <span class="step-badge">3</span>
+          <h2>재생 &amp; 소리 다듬기</h2>
+        </div>
+        <span class="hint">설정 변경 시 현재 악보가 실시간으로 재계산됩니다.</span>
       </div>
 
       <div class="player-bar">
         <div class="player-info">
           <strong id="songTitle">선택된 곡 없음</strong>
-          <span id="songMeta" class="meta-text">MIDI 파일을 올리거나 테스트 곡을 선택하세요.</span>
+          <span id="songMeta" class="meta-text">MIDI 파일을 올리거나 내장 데모 곡을 선택하세요.</span>
         </div>
 
         <div class="progress-wrap">
@@ -160,64 +185,136 @@
           <span id="timeTotal" class="time-label">0:00</span>
         </div>
 
-        <div class="player-controls">
-          <button id="btnPlay" class="btn btn-primary" disabled>재생</button>
-          <button id="btnPause" class="btn btn-secondary" disabled>일시정지</button>
-          <button id="btnStop" class="btn btn-secondary" disabled>정지</button>
-          <label class="option-item">
-            <span>속도 <strong id="speedLabel">1.0x</strong></span>
-            <input type="range" id="speedSlider" min="50" max="200" value="100" />
-          </label>
-          <label class="option-item">
-            <span>조옮김 <strong id="transposeLabel">0</strong></span>
-            <input type="range" id="transposeSlider" min="-12" max="12" value="0" />
-          </label>
-          <label class="option-item">
-            <span>옥타브</span>
-            <select id="octaveSelect">
-              <option value="-2">-2 옥타브</option>
-              <option value="-1">-1 옥타브</option>
-              <option value="0" selected>기본 (0)</option>
-              <option value="1">+1 옥타브</option>
-              <option value="2">+2 옥타브</option>
-            </select>
-          </label>
-          <label class="option-item" title="유튜브 등 풍부한 음원은 스마트 분배가 훨씬 깔끔합니다">
-            <span>분배 방식</span>
-            <select id="allocModeSelect">
-              <option value="smart" selected>스마트 분배 (유튜브 권장)</option>
-              <option value="pitch">단순 높이순 (정식 MIDI)</option>
-            </select>
-          </label>
-          <label class="option-item" title="고음 탈조가 발생하면 C6(안전)으로 낮춰보세요">
-            <span>고음 상한</span>
-            <select id="maxNoteSelect">
-              <option value="84">C6 (안전)</option>
-              <option value="88">E6 (권장)</option>
-              <option value="91" selected>G6 (확장)</option>
-              <option value="127">제한 없음</option>
-            </select>
-          </label>
-          <label class="option-item" title="음표 전환 시 짧은 무음 간격을 넣어 스텝모터 타건감을 살립니다">
-            <span>스타카토 <strong id="staccatoLabel">0ms</strong></span>
-            <input type="range" id="staccatoSlider" min="0" max="40" step="5" value="0" />
-          </label>
-          <label class="option-item" title="지정한 길이보다 짧은 점(잡음) 음표를 실시간 제거합니다">
-            <span>잡음 컷(길이) <strong id="minDurLabel">0ms</strong></span>
-            <input type="range" id="minDurSlider" min="0" max="250" step="10" value="0" />
-          </label>
-          <label class="option-item" title="지정한 강도(Velocity)보다 약한 배음·잔향 음표를 실시간 제거합니다">
-            <span>잡음 컷(강도) <strong id="minVelLabel">0</strong></span>
-            <input type="range" id="minVelSlider" min="0" max="90" step="5" value="0" />
-          </label>
-          <button id="btnExportIno" class="btn btn-secondary" disabled title="PC 없이 Arduino Uno 단독 연주용 스케치 다운로드">단독 .ino 내보내기</button>
+        <!-- 재생 액션 바 -->
+        <div class="transport-row">
+          <div class="transport-left">
+            <button id="btnPlay" class="btn btn-primary" type="button" disabled>재생</button>
+            <button id="btnPause" class="btn btn-secondary" type="button" disabled>일시정지</button>
+            <button id="btnStop" class="btn btn-secondary" type="button" disabled>정지</button>
+          </div>
+          <div class="transport-right">
+            <button id="btnResetSettings" class="btn btn-secondary" type="button" title="속도·음높이·끊김·잡음 제거 설정을 초기 기본값으로 되돌립니다">설정 초기화</button>
+            <button id="btnExportIno" class="btn btn-secondary" type="button" disabled title="PC 연결 없이 Arduino Uno 혼자서 연주하도록 .ino 스케치 파일을 저장합니다">아두이노 .ino 저장</button>
+          </div>
+        </div>
+
+        <!-- 3개 역할 그룹으로 정리된 9개 세부 설정 (3×3 균형 그리드) -->
+        <div class="settings-groups">
+          <!-- 그룹 A: 재생 · 음높이 -->
+          <div class="settings-group">
+            <h3 class="settings-group-title">재생 · 음높이</h3>
+
+            <div class="control-cell">
+              <div class="control-head">
+                <span>재생 속도</span>
+                <strong id="speedLabel" class="control-val">1.0x</strong>
+              </div>
+              <input type="range" id="speedSlider" min="50" max="200" value="100" />
+              <p class="control-desc">연주 빠르기 (0.5x ~ 2.0x)</p>
+            </div>
+
+            <div class="control-cell">
+              <div class="control-head">
+                <span>음높이 (반음)</span>
+                <strong id="transposeLabel" class="control-val">0</strong>
+              </div>
+              <input type="range" id="transposeSlider" min="-12" max="12" value="0" />
+              <p class="control-desc">곡의 키를 반음 단위로 위아래 조절</p>
+            </div>
+
+            <div class="control-cell">
+              <div class="control-head">
+                <span>옥타브 이동</span>
+              </div>
+              <select id="octaveSelect">
+                <option value="-2">-2 옥타브 (저음)</option>
+                <option value="-1">-1 옥타브</option>
+                <option value="0" selected>기본 (0)</option>
+                <option value="1">+1 옥타브</option>
+                <option value="2">+2 옥타브 (고음)</option>
+              </select>
+              <p class="control-desc">모터 소리가 너무 낮거나 높을 때 전체 이동</p>
+            </div>
+          </div>
+
+          <!-- 그룹 B: 모터 음질 · 타건감 -->
+          <div class="settings-group">
+            <h3 class="settings-group-title">모터 음질 · 타건감</h3>
+
+            <div class="control-cell">
+              <div class="control-head">
+                <span>음표 끊김 (스타카토)</span>
+                <strong id="staccatoLabel" class="control-val">25ms</strong>
+              </div>
+              <input type="range" id="staccatoSlider" min="0" max="80" step="5" value="25" />
+              <p class="control-desc">리듬·게임곡 25~35ms / 클래식·발라드 0~10ms</p>
+            </div>
+
+            <div class="control-cell">
+              <div class="control-head">
+                <span>고음 제한 (탈조 방지)</span>
+              </div>
+              <select id="maxNoteSelect">
+                <option value="84">C6 (안전)</option>
+                <option value="88">E6 (권장)</option>
+                <option value="91" selected>G6 (확장)</option>
+                <option value="127">제한 없음</option>
+              </select>
+              <p class="control-desc">한계 이상 고음은 자동으로 한 옥타브 내림</p>
+            </div>
+
+            <div class="control-cell">
+              <div class="control-head">
+                <span>빈 모터 화음 채우기</span>
+              </div>
+              <select id="voiceFillSelect">
+                <option value="original" selected>원본 유지</option>
+                <option value="harmonize">빈 축 화음 보강</option>
+              </select>
+              <p class="control-desc">1~2축만 울릴 때 빈 모터에 화음을 자동 보강</p>
+            </div>
+          </div>
+
+          <!-- 그룹 C: MIDI 분배 · 잡음 정리 -->
+          <div class="settings-group">
+            <h3 class="settings-group-title">MIDI 분배 · 잡음 정리</h3>
+
+            <div class="control-cell">
+              <div class="control-head">
+                <span>4모터 분배 규칙</span>
+              </div>
+              <select id="allocModeSelect">
+                <option value="smart" selected>계층 자동 분배 (권장)</option>
+                <option value="pitch">단순 음높이순</option>
+              </select>
+              <p class="control-desc">외부 다중트랙 MIDI의 4축 배분 방식 선택</p>
+            </div>
+
+            <div class="control-cell">
+              <div class="control-head">
+                <span>짧은 잡음 무시 (ms)</span>
+                <strong id="minDurLabel" class="control-val">0ms</strong>
+              </div>
+              <input type="range" id="minDurSlider" min="0" max="250" step="10" value="0" />
+              <p class="control-desc">지정한 길이보다 짧은 점 잡음 음표를 제거</p>
+            </div>
+
+            <div class="control-cell">
+              <div class="control-head">
+                <span>약한 잡음 무시 (세기)</span>
+                <strong id="minVelLabel" class="control-val">0</strong>
+              </div>
+              <input type="range" id="minVelSlider" min="0" max="90" step="5" value="0" />
+              <p class="control-desc">지정한 세기보다 약한 잔향·배음을 제거</p>
+            </div>
+          </div>
         </div>
 
         <!-- MIDI 트랙 선택 및 4축 수동 매핑 패널 -->
         <div id="trackListPanel" class="track-panel hidden">
           <div class="track-panel-header">
-            <h3>MIDI 트랙별 축 매핑</h3>
-            <span class="hint">원하는 트랙만 선택하거나 특정 축(X/Y/Z/A)에 고정 배정할 수 있습니다.</span>
+            <h3>트랙별 모터 직접 지정</h3>
+            <span class="hint">원하는 악기 트랙만 켜거나 특정 축(X/Y/Z/A)에 직접 고정할 수 있습니다.</span>
           </div>
           <div class="track-table-wrap">
             <table class="track-table">
@@ -226,7 +323,7 @@
                   <th>포함</th>
                   <th>트랙명</th>
                   <th>음표 수</th>
-                  <th>축 매핑</th>
+                  <th>담당 모터</th>
                 </tr>
               </thead>
               <tbody id="trackTableBody"></tbody>
@@ -236,53 +333,167 @@
       </div>
     </section>
 
-    <!-- 4채널 피아노 롤 시각화 -->
-    <section class="card">
+    <!-- ④ 피아노 롤 악보 편집 -->
+    <section id="pianoRollCard" class="card pianoroll-card">
       <div class="card-header">
-        <h2>4채널 피아노 롤 (Piano Roll)</h2>
+        <div class="card-title-wrap">
+          <span class="step-badge">4</span>
+          <h2>피아노 롤 악보 편집</h2>
+        </div>
         <div class="inline-options">
+          <div class="fs-transport">
+            <button id="fsBtnPlay" class="btn-mini btn-fs-play" type="button" disabled>재생</button>
+            <button id="fsBtnPause" class="btn-mini" type="button" disabled>일시정지</button>
+            <button id="fsBtnStop" class="btn-mini" type="button" disabled>정지</button>
+            <span id="fsTimeLabel" class="time-label">0:00 / 0:00</span>
+          </div>
           <div class="legend">
-            <span class="legend-item"><i class="dot ch0"></i>X축</span>
-            <span class="legend-item"><i class="dot ch1"></i>Y축</span>
-            <span class="legend-item"><i class="dot ch2"></i>Z축</span>
-            <span class="legend-item"><i class="dot ch3"></i>A축</span>
+            <span class="legend-item"><i class="dot ch0"></i>X 하이</span>
+            <span class="legend-item"><i class="dot ch1"></i>Y 멜로디</span>
+            <span class="legend-item"><i class="dot ch2"></i>Z 미들</span>
+            <span class="legend-item"><i class="dot ch3"></i>A 베이스</span>
           </div>
           <label class="option-item">
-            <span>가로 줌</span>
+            <span>가로 확대</span>
             <input type="range" id="zoomSlider" min="40" max="220" value="95" />
           </label>
-          <span class="hint">캔버스 클릭으로 구간 이동</span>
+          <button id="btnFullscreenRoll" class="btn-mini" type="button" title="피아노 롤 화면을 전체화면으로 확대/복귀 (ESC)">전체화면</button>
         </div>
       </div>
-      <div class="pianoroll-wrap">
+
+      <!-- 피아노 롤 편집 툴바 -->
+      <div class="pianoroll-toolbar">
+        <div class="toolbar-group mode-toggle">
+          <button id="btnModeSeek" class="btn-mini btn-mode active" type="button" title="클릭한 시간 위치로 재생 시점을 이동합니다">구간 이동</button>
+          <button id="btnModeEdit" class="btn-mini btn-mode" type="button" title="캔버스에서 음표를 직접 추가·이동·길이 조절·삭제합니다">악보 편집</button>
+        </div>
+
+        <div class="toolbar-group axis-picker" title="악보 편집에서 새로 그릴 모터 축 선택">
+          <span class="toolbar-label">그릴 축</span>
+          <button class="btn-mini btn-axis active" data-ch="0" type="button"><i class="dot ch0"></i>X 하이</button>
+          <button class="btn-mini btn-axis" data-ch="1" type="button"><i class="dot ch1"></i>Y 멜로디</button>
+          <button class="btn-mini btn-axis" data-ch="2" type="button"><i class="dot ch2"></i>Z 미들</button>
+          <button class="btn-mini btn-axis" data-ch="3" type="button"><i class="dot ch3"></i>A 베이스</button>
+        </div>
+
+        <div class="toolbar-group">
+          <label class="option-item" title="편집 격자(마디·박자선) 기준 템포">
+            <span>BPM</span>
+            <input id="editorBpmInput" class="bpm-input" type="number" min="40" max="240" value="120" />
+          </label>
+          <label class="option-item" title="음표를 그리거나 옮길 때 달라붙는 박자 눈금 단위">
+            <span>박자 맞춤</span>
+            <select id="snapSelect">
+              <option value="0">자유</option>
+              <option value="1">4분음표 (1/4)</option>
+              <option value="2">8분음표 (1/8)</option>
+              <option value="4" selected>16분음표 (1/16)</option>
+            </select>
+          </label>
+          <button id="btnPitchUp" class="btn-mini" type="button" title="고음 영역으로 세로 이동">▲ 위 음역</button>
+          <button id="btnPitchDown" class="btn-mini" type="button" title="저음 영역으로 세로 이동">▼ 아래 음역</button>
+        </div>
+
+        <div class="toolbar-group toolbar-actions">
+          <button id="btnUndo" class="btn-mini" type="button" disabled title="실행 취소 (Ctrl+Z)">실행 취소</button>
+          <button id="btnRedo" class="btn-mini" type="button" disabled title="다시 실행 (Ctrl+Y)">다시 실행</button>
+          <button id="btnNewBlank" class="btn-mini" type="button" title="빈 4성부 악보를 새로 만들고 직접 작곡합니다">새 빈 악보</button>
+          <button id="btnExportMidi" class="btn-mini btn-save-midi" type="button" disabled title="현재 편집된 4채널 악보를 표준 4트랙 .mid 파일로 저장">4트랙 .mid 저장</button>
+        </div>
+      </div>
+
+      <div id="editorHint" class="editor-hint">
+        구간 이동: 캔버스를 클릭해 원하는 재생 위치로 이동합니다. 음표를 직접 수정하려면 [악보 편집]을 누르세요.
+      </div>
+
+      <div id="pianoRollWrap" class="pianoroll-wrap">
         <canvas id="pianoRollCanvas"></canvas>
+      </div>
+      <div id="pianoRollHScroll" class="pianoroll-hscroll" title="피아노 롤 시간축 가로 스크롤">
+        <div id="pianoRollHSpacer" class="pianoroll-hspacer"></div>
       </div>
     </section>
 
-    <!-- 가상 건반 -->
+    <!-- ⑤ 실시간 가상 건반 -->
     <section class="card">
       <div class="card-header">
-        <h2>실시간 가상 건반 (최대 4화음 동시 입력)</h2>
-        <span class="hint">마우스 클릭 또는 PC 키보드(A~K: 흰건반, W·E·T·Y·U: 검은건반)로 바로 연주</span>
+        <div class="card-title-wrap">
+          <span class="step-badge">5</span>
+          <h2>실시간 가상 건반 <span class="title-sub">(최대 4화음 동시 연주)</span></h2>
+        </div>
+        <span class="hint">마우스 클릭 또는 키보드(A~K: 흰건반, W·E·T·Y·U: 검은건반)로 바로 테스트 연주</span>
       </div>
       <div id="pianoKeyboard" class="piano-keyboard"></div>
     </section>
 
-    <!-- 시리얼 로그 -->
+    <!-- ⑥ 시리얼 통신 로그 -->
     <section class="card">
       <div class="card-header">
-        <h2>시리얼 통신 로그</h2>
-        <button id="btnClearLog" class="btn-mini">로그 지우기</button>
+        <div class="card-title-wrap">
+          <span class="step-badge">6</span>
+          <h2>시리얼 통신 로그</h2>
+        </div>
+        <div class="inline-options">
+          <button id="btnToggleLog" class="btn-mini" type="button">로그 접기</button>
+          <button id="btnClearLog" class="btn-mini" type="button">로그 지우기</button>
+        </div>
       </div>
       <pre id="serialLog" class="log-box">MidiMoter 웹 컨트롤러가 준비되었습니다.
 아두이노에 MidiMoter_4Axis.ino를 업로드한 뒤 [시리얼 연결]을 눌러주세요.
-(연결 전에도 '브라우저 미리듣기'로 4성부 연주를 먼저 확인해 볼 수 있습니다.)</pre>
+(연결 전에도 'PC 미리듣기'로 4성부 연주를 먼저 확인해 볼 수 있습니다.)</pre>
     </section>
   </main>
+
+  <!-- 기능 안내 빠른 가이드 모달 -->
+  <div id="helpModal" class="help-modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="helpModalTitle">
+    <div class="help-modal">
+      <div class="help-modal-header">
+        <h2 id="helpModalTitle">MidiMoter 기능 한눈에 보기</h2>
+        <button id="btnCloseHelp" class="btn-mini" type="button">닫기 (ESC)</button>
+      </div>
+      <div class="help-grid">
+        <div class="help-section">
+          <h3>1. 4개 모터 역할 분담</h3>
+          <ul>
+            <li><strong>X축 (파랑) · 하이</strong> — 가장 높은 리드 음 · 고음 장식</li>
+            <li><strong>Y축 (초록) · 멜로디</strong> — 중심 주선율 · 보컬 라인</li>
+            <li><strong>Z축 (노랑) · 미들</strong> — 중저음 코드 화음 · 아르페지오</li>
+            <li><strong>A축 (분홍) · 베이스</strong> — 가장 낮은 저음 리듬 · 근음</li>
+          </ul>
+        </div>
+        <div class="help-section">
+          <h3>2. 깔끔한 연주를 위한 추천 순서</h3>
+          <ul>
+            <li><strong>가장 추천:</strong> 인터넷에서 구한 <strong>.mid 악보 파일</strong>을 바로 끌어다 놓으면 100% 원음 그대로 4축에 자동 배분됩니다.</li>
+            <li><strong>악보가 없을 때:</strong> 유튜브/MP3 AI 변환(드럼이 있는 곡은 <strong>고품질 변환</strong>) 후 ④ 피아노 롤에서 어색한 음표만 다듬으세요.</li>
+            <li><strong>파일 공유:</strong> 편집이 끝난 악보는 <strong>4트랙 .mid 저장</strong> 또는 <strong>아두이노 .ino 저장</strong>으로 보관할 수 있습니다.</li>
+          </ul>
+        </div>
+        <div class="help-section">
+          <h3>3. 장르별 추천 소리 설정</h3>
+          <ul>
+            <li><strong>게임·일렉·리듬곡:</strong> 음표 끊김 <code>25~35ms</code> (톡톡 끊기는 타건감)</li>
+            <li><strong>클래식·발라드:</strong> 음표 끊김 <code>0~10ms</code> (부드럽게 이어지는 화음)</li>
+            <li><strong>고음이 삑사리(탈조) 날 때:</strong> 고음 제한을 <code>E6</code> 또는 <code>C6</code>로 낮추기</li>
+            <li><strong>단선율 구간이 허전할 때:</strong> <code>빈 모터 화음 채우기</code> 켜기</li>
+          </ul>
+        </div>
+        <div class="help-section">
+          <h3>4. 피아노 롤 편집 &amp; 단축키</h3>
+          <ul>
+            <li><strong>악보 편집 모드:</strong> 빈 칸 클릭/드래그=추가, 음표 이동·오른쪽 끝 드래그=길이 조절, 우클릭/`Delete`=삭제</li>
+            <li><strong>화면 이동:</strong> 마우스 휠=세로 이동, <code>Shift</code>+휠=가로 스크롤, 상단 눈금 클릭=구간 이동</li>
+            <li><strong>단축키:</strong> <code>Ctrl+Z</code> 실행 취소 · <code>Ctrl+Y</code> 다시 실행 · <code>ESC</code> 전체화면/창 닫기</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <script src="js/serial.js"></script>
   <script src="js/midiParser.js"></script>
   <script src="js/pianoRoll.js"></script>
+  <script src="js/midiExporter.js"></script>
   <script src="js/exporter.js"></script>
   <script src="js/audioPreview.js"></script>
   <script src="js/app.js"></script>
