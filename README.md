@@ -1,4 +1,4 @@
-# MidiMoter — 4채널 스텝모터 오케스트라 (v6.0)
+# MidiMotor — 4채널 스텝모터 오케스트라 (v6.0)
 
 Arduino Uno + CNC Shield V3 + A4988 × 4 + NEMA17 × 4 하드웨어를 웹 브라우저(`Web Serial API`)로 제어해, MIDI 파일 및 유튜브·오디오 음원을 4단 계층(`베이스 → 미들 → 멜로디 → 하이`) 4성부 화음으로 연주하는 프로젝트입니다.
 
